@@ -1,15 +1,22 @@
-import hashlib
 import json
+import math
 import random
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from html.parser import HTMLParser
 from typing import Any, Sequence
 
 import pybase64
 
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
+CHROME_JS_HEAP_SIZE_LIMIT = 4395630592
+_FNV_OFFSET = 2166136261
+_FNV_PRIME = 16777619
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+# Page probes: ai, createPRNG, cache, data, solana, dump, InstallTrigger.
+_CHROME_FLAGS = (0, 0, 0, 0, 0, 0, 0)
 from utils.helper import new_uuid
 
 
@@ -49,9 +56,34 @@ def parse_pow_resources(html_content: str) -> tuple[list[str], str]:
     return script_sources, data_build
 
 
-def _legacy_parse_time() -> str:
-    now = datetime.now(timezone(timedelta(hours=-5)))
-    return now.strftime("%a %b %d %Y %H:%M:%S") + " GMT-0500 (Eastern Standard Time)"
+def _chrome_local_date(moment: datetime | None = None) -> str:
+    local = moment.astimezone() if moment is not None else datetime.now().astimezone()
+    offset = local.utcoffset()
+    total_seconds = int(offset.total_seconds()) if offset is not None else 0
+    sign = "+" if total_seconds >= 0 else "-"
+    total_seconds = abs(total_seconds)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes = remainder // 60
+    if sign == "+" and hours == 8 and minutes == 0:
+        tz_name = "中国标准时间"
+    else:
+        tz_name = local.tzname() or "UTC"
+    return (
+        f"{_WEEKDAYS[local.weekday()]} {_MONTHS[local.month - 1]} {local.day:02d} {local.year:04d} "
+        f"{local.hour:02d}:{local.minute:02d}:{local.second:02d} "
+        f"GMT{sign}{hours:02d}{minutes:02d} ({tz_name})"
+    )
+
+
+def _js_time(value: float) -> int | float:
+    rounded = round(float(value), 1)
+    if rounded.is_integer():
+        return int(rounded)
+    return rounded
+
+
+def _js_round(value: float) -> int:
+    return int(math.floor(value + 0.5))
 
 
 def build_pow_config(
@@ -141,45 +173,61 @@ def build_pow_config(
         "__NEXT_PRELOADREADY",
     ])
     script_source = random.choice(list(script_sources)) if script_sources else DEFAULT_POW_SCRIPT
+    page_now = _js_time(random.uniform(400.0, 9000.0))
+    time_origin = _js_time((time.time() * 1000) - float(page_now))
     return [
-        sum(random.choices(SCREEN_RESOLUTIONS, k=1)[0]),
-        _legacy_parse_time(),
-        4294705152,
-        1,
+        sum(random.choice(SCREEN_RESOLUTIONS)),
+        _chrome_local_date(),
+        CHROME_JS_HEAP_SIZE_LIMIT,
+        random.random(),
         user_agent,
         script_source,
         data_build,
-        "en-US",
-        "en-US,es-US,en,es",
+        "zh-CN",
+        "zh-CN,en,zh",
         random.random(),
         navigator_key,
         random.choice(DOCUMENT_KEYS),
         window_key,
-        time.perf_counter() * 1000,
+        page_now,
         new_uuid(),
         "",
         random.choice(CORES),
-        time.time() * 1000 - (time.perf_counter() * 1000),
-        0, 0, 0, 0, 0, 0,
-        0,  # 0 = edge/chrome, 1 = firefox
+        time_origin,
+        *_CHROME_FLAGS,
     ]
 
 
-def _pow_generate(seed: str, difficulty: str, config: list[Any], limit: int = 500000) -> tuple[str, bool]:
-    target = bytes.fromhex(difficulty)
-    diff_len = len(difficulty) // 2
-    seed_bytes = seed.encode()
-    static_1 = (json.dumps(config[:3], separators=(",", ":"), ensure_ascii=False)[:-1] + ",").encode()
-    static_2 = ("," + json.dumps(config[4:9], separators=(",", ":"), ensure_ascii=False)[1:-1] + ",").encode()
-    static_3 = ("," + json.dumps(config[10:], separators=(",", ":"), ensure_ascii=False)[1:]).encode()
-    for i in range(limit):
-        final_json = static_1 + str(i).encode() + static_2 + str(i >> 1).encode() + static_3
-        encoded = pybase64.b64encode(final_json)
-        digest = hashlib.sha3_512(seed_bytes + encoded).digest()
-        if digest[:diff_len] <= target:
-            return encoded.decode(), True
-    fallback = "wQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4D" + pybase64.b64encode(f'"{seed}"'.encode()).decode()
-    return fallback, False
+def _fnv1a_mix(text: str) -> str:
+    value = _FNV_OFFSET
+    for char in text:
+        value ^= ord(char)
+        value = (value * _FNV_PRIME) & 0xFFFFFFFF
+    value ^= value >> 16
+    value = (value * 2246822507) & 0xFFFFFFFF
+    value ^= value >> 13
+    value = (value * 3266489909) & 0xFFFFFFFF
+    value ^= value >> 16
+    return f"{value & 0xFFFFFFFF:08x}"
+
+
+def _config_template(config: Sequence[Any]) -> tuple[str, str, str]:
+    head = json.dumps(list(config[:3]), separators=(",", ":"), ensure_ascii=False)
+    middle = json.dumps(list(config[4:9]), separators=(",", ":"), ensure_ascii=False)
+    tail = json.dumps(list(config[10:]), separators=(",", ":"), ensure_ascii=False)
+    return head[:-1] + ",", middle[1:-1] + ",", tail[1:]
+
+
+def _pow_generate(seed: str, difficulty: str, config: Sequence[Any], limit: int = 500000) -> tuple[str, bool]:
+    prefix, middle, suffix = _config_template(config)
+    started = time.perf_counter()
+    for attempt in range(limit):
+        elapsed = _js_round((time.perf_counter() - started) * 1000)
+        raw = f"{prefix}{attempt},{middle}{elapsed},{suffix}"
+        encoded = pybase64.b64encode(raw.encode("utf-8")).decode("ascii")
+        if _fnv1a_mix(seed + encoded)[: len(difficulty)] <= difficulty:
+            return encoded + "~S", True
+    return "", False
 
 
 def build_legacy_requirements_token(
@@ -188,9 +236,11 @@ def build_legacy_requirements_token(
     data_build: str = "",
 ) -> str:
     config = build_pow_config(user_agent, script_sources=script_sources, data_build=data_build)
-    return "gAAAAAC" + pybase64.b64encode(
-        json.dumps(config, separators=(",", ":"), ensure_ascii=False).encode()
-    ).decode()
+    # The page hashes a private Math.random() seed at difficulty "0".
+    answer, solved = _pow_generate(str(random.random()), "0", config)
+    if not solved:
+        raise RuntimeError("failed to solve requirements token")
+    return "gAAAAAC" + answer
 
 
 def build_proof_token(
