@@ -1,4 +1,5 @@
 name: Publish Docker Image
+# registered for manual builds
 
 on:
   push:
