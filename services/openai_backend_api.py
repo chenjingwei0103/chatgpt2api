@@ -65,8 +65,27 @@ class ChatRequirements:
     raw_finalize: Optional[Dict[str, Any]] = None
 
 
-DEFAULT_CLIENT_VERSION = "prod-a194cd50d4416d3c0b47c740f206b12ce60f5887"
-DEFAULT_CLIENT_BUILD_NUMBER = "6708908"
+DEFAULT_CLIENT_VERSION = "prod-e0e6637ebf1dbe024371aece17ddd0057b5734fa"
+DEFAULT_CLIENT_BUILD_NUMBER = "11735244"
+DEFAULT_CHROME_FULL_VERSION = "154.0.8037.93"
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+)
+DEFAULT_SEC_CH_UA = '"Chromium";v="154", "Google Chrome";v="154", "Not A(Brand";v="99"'
+DEFAULT_SEC_CH_UA_FULL_VERSION_LIST = (
+    '"Chromium";v="154.0.8037.93", "Google Chrome";v="154.0.8037.93", '
+    '"Not A(Brand";v="99.0.0.0"'
+)
+DEFAULT_CLIENT_OBSERVATION = "v1.s.p.tvSvXZjdvc0We_rq"
+DEFAULT_IMPERSONATE = "chrome142"
+WEB_MODEL_RESPONSE_CONTRACTS = [
+    {
+        "id": "photo_upload_action.v1",
+        "protocol_version": 1,
+        "presets": ["cap:image", "cap:file", "placement:end"],
+    }
+]
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
 CODEX_IMAGE_MODEL_25 = "codex-gpt-image-2.5"
@@ -211,15 +230,13 @@ class OpenAIBackendAPI:
             "User-Agent": self.user_agent,
             "Origin": self.base_url,
             "Referer": self.base_url + "/",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Priority": "u=1, i",
             "Sec-Ch-Ua": self.fp["sec-ch-ua"],
             "Sec-Ch-Ua-Arch": '"x86"',
             "Sec-Ch-Ua-Bitness": '"64"',
-            "Sec-Ch-Ua-Full-Version": '"143.0.3650.96"',
-            "Sec-Ch-Ua-Full-Version-List": '"Microsoft Edge";v="143.0.3650.96", "Chromium";v="143.0.7499.147", "Not A(Brand";v="24.0.0.0"',
+            "Sec-Ch-Ua-Full-Version": f'"{DEFAULT_CHROME_FULL_VERSION}"',
+            "Sec-Ch-Ua-Full-Version-List": DEFAULT_SEC_CH_UA_FULL_VERSION_LIST,
             "Sec-Ch-Ua-Mobile": self.fp["sec-ch-ua-mobile"],
             "Sec-Ch-Ua-Model": '""',
             "Sec-Ch-Ua-Platform": self.fp["sec-ch-ua-platform"],
@@ -233,6 +250,9 @@ class OpenAIBackendAPI:
             "OAI-Client-Version": self.client_version,
             "OAI-Client-Build-Number": self.client_build_number,
         })
+        cookie = str(self.account.get("cookie") or "").strip()
+        if cookie:
+            self.session.headers["Cookie"] = cookie
         if self.access_token:
             self.session.headers["Authorization"] = f"Bearer {self.access_token}"
 
@@ -275,13 +295,12 @@ class OpenAIBackendAPI:
                 fp[key] = value
         fp.setdefault(
             "user-agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+            DEFAULT_USER_AGENT,
         )
-        fp.setdefault("impersonate", "chrome110")
+        fp.setdefault("impersonate", DEFAULT_IMPERSONATE)
         fp.setdefault("oai-device-id", new_uuid())
         fp.setdefault("oai-session-id", new_uuid())
-        fp.setdefault("sec-ch-ua", '"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"')
+        fp.setdefault("sec-ch-ua", DEFAULT_SEC_CH_UA)
         fp.setdefault("sec-ch-ua-mobile", "?0")
         fp.setdefault("sec-ch-ua-platform", '"Windows"')
         return fp
@@ -291,9 +310,113 @@ class OpenAIBackendAPI:
         headers = dict(self.session.headers)
         headers["X-OpenAI-Target-Path"] = path
         headers["X-OpenAI-Target-Route"] = path
+        headers.setdefault("X-OpenAI-Web-Frontend", "core_web")
+        headers.setdefault("OAI-GenUI-Client-Actions", "open_entity_detail,run_plugin_tool")
+        headers.setdefault("X-OAI-Is-Client-Observation", DEFAULT_CLIENT_OBSERVATION)
         if extra:
             headers.update(extra)
         return headers
+
+    def _client_contextual_info(self) -> Dict[str, Any]:
+        return {
+            "is_dark_mode": True,
+            "time_since_loaded": max(1, int(time.monotonic())),
+            "page_height": 653,
+            "page_width": 1541,
+            "pixel_ratio": 1,
+            "screen_height": 2160,
+            "screen_width": 3840,
+            "app_name": "chatgpt.com",
+            "has_web_push_capabilities": True,
+            "web_push_notification_permission": "default",
+        }
+
+    def _oai_echo_logs(self) -> str:
+        now_ms = max(1000, int(time.monotonic() * 1000))
+        marks = []
+        cursor = max(1500, int(now_ms * 0.02))
+        for index, gap in enumerate((2200, 180, 1400, 1100, now_ms // 2, max(800, now_ms // 25))):
+            cursor += gap
+            marks.append(f"{index % 2},{cursor}")
+        return ",".join(marks)
+
+    def _oai_telemetry(self) -> str:
+        elapsed = round(20 + (time.monotonic() % 1800), 1)
+        counters = [1, elapsed, 17, 36, 6, 2, 0, 128]
+        return "[" + ",".join(str(item) for item in counters) + "]"
+
+    def _web_metric_headers(self) -> Dict[str, str]:
+        return {
+            "OAI-Echo-Logs": self._oai_echo_logs(),
+            "OAI-Telemetry": self._oai_telemetry(),
+            "X-OAI-Turn-Trace-Id": new_uuid(),
+            "X-OpenAI-Web-SSE-Compression": "identity",
+        }
+
+    @staticmethod
+    def _sentinel_headers(requirements: ChatRequirements) -> Dict[str, str]:
+        headers = {
+            "OpenAI-Sentinel-Chat-Requirements-Token": requirements.token,
+        }
+        if requirements.proof_token:
+            headers["OpenAI-Sentinel-Proof-Token"] = requirements.proof_token
+        if requirements.turnstile_token:
+            headers["OpenAI-Sentinel-Turnstile-Token"] = requirements.turnstile_token
+        if requirements.so_token:
+            headers["OpenAI-Sentinel-SO-Token"] = requirements.so_token
+        return headers
+
+    def _prepare_headers(self, path: str, conduit_token: str = "no-token") -> Dict[str, str]:
+        return self._headers(path, {
+            "Accept": "*/*",
+            "Content-Type": "application/json",
+            "X-Conduit-Token": conduit_token or "no-token",
+            "X-OAI-Turn-Trace-Id": new_uuid(),
+        })
+
+    def _prepare_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        messages = payload.get("messages") or []
+        last = messages[-1] if messages else {}
+        body = {
+            "action": "next",
+            "fork_from_shared_post": False,
+            "parent_message_id": payload.get("parent_message_id") or "client-created-root",
+            "model": payload.get("model") or "auto",
+            "client_prepare_state": "success",
+            "timezone_offset_min": payload.get("timezone_offset_min", -480),
+            "timezone": payload.get("timezone") or "Asia/Shanghai",
+            "conversation_mode": payload.get("conversation_mode") or {"kind": "primary_assistant"},
+            "enable_message_followups": True,
+            "system_hints": list(payload.get("system_hints") or []),
+            "model_response_contracts": payload.get("model_response_contracts") or WEB_MODEL_RESPONSE_CONTRACTS,
+            "partial_query": {
+                "id": last.get("id") or new_uuid(),
+                "author": last.get("author") or {"role": "user"},
+                "content": last.get("content") or {"content_type": "text", "parts": [""]},
+            },
+            "supports_buffering": True,
+            "supported_encodings": ["v1"],
+            "client_contextual_info": payload.get("client_contextual_info") or self._client_contextual_info(),
+        }
+        if payload.get("conversation_id"):
+            body["conversation_id"] = payload["conversation_id"]
+        if payload.get("thinking_effort"):
+            body["thinking_effort"] = payload["thinking_effort"]
+        return body
+
+    def _prepare_f_conversation(self, payload: Dict[str, Any]) -> str:
+        path = "/backend-api/f/conversation/prepare"
+        response = self.session.post(
+            self.base_url + path,
+            headers=self._prepare_headers(path),
+            json=self._prepare_payload(payload),
+            timeout=60,
+        )
+        ensure_ok(response, path)
+        token = str((response.json() or {}).get("conduit_token") or "")
+        if not token:
+            raise RuntimeError("missing conduit_token")
+        return token
 
     @staticmethod
     def _extract_quota_and_restore_at(limits_progress: list[Any]) -> tuple[int, str | None]:
@@ -441,19 +564,20 @@ class OpenAIBackendAPI:
             raw_finalize=data,
         )
 
-    def _conversation_headers(self, path: str, requirements: ChatRequirements) -> Dict[str, str]:
-        """根据当前 requirements 构造对话 SSE 请求头。"""
+    def _conversation_headers(
+            self,
+            path: str,
+            requirements: ChatRequirements,
+            conduit_token: str = "",
+    ) -> Dict[str, str]:
         headers = {
             "Accept": "text/event-stream",
             "Content-Type": "application/json",
-            "OpenAI-Sentinel-Chat-Requirements-Token": requirements.token,
+            **self._sentinel_headers(requirements),
+            **self._web_metric_headers(),
         }
-        if requirements.proof_token:
-            headers["OpenAI-Sentinel-Proof-Token"] = requirements.proof_token
-        if requirements.turnstile_token:
-            headers["OpenAI-Sentinel-Turnstile-Token"] = requirements.turnstile_token
-        if requirements.so_token:
-            headers["OpenAI-Sentinel-SO-Token"] = requirements.so_token
+        if conduit_token:
+            headers["X-Conduit-Token"] = conduit_token
         return self._headers(path, headers)
 
     def _api_messages_to_conversation_messages(self, messages: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
@@ -539,44 +663,83 @@ class OpenAIBackendAPI:
             return "extended"
         return ""
 
+    def _decorate_web_messages(self, messages: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+        decorated = []
+        for item in messages:
+            message = dict(item)
+            message.setdefault("create_time", round(time.time(), 3))
+            if (message.get("author") or {}).get("role") == "user":
+                metadata = dict(message.get("metadata") or {})
+                metadata.setdefault("automation_creation_attribution", {
+                    "origin": "conversation",
+                    "flow_id": new_uuid(),
+                })
+                metadata.setdefault("serialization_metadata", {"custom_symbol_offsets": []})
+                metadata.setdefault("submission_mode", "manual_send")
+                message["metadata"] = metadata
+            decorated.append(message)
+        return decorated
+
     def _conversation_payload(
             self,
             messages: list[Dict[str, Any]],
             model: str,
             timezone: str,
             thinking_effort: str = "",
+            system_hints: Optional[list[str]] = None,
     ) -> Dict[str, Any]:
-        """把标准 messages 构造成 web 对话请求体。"""
-        payload = {
-            "action": "next",
-            "messages": self._api_messages_to_conversation_messages(messages),
-            "model": model,
-            "parent_message_id": new_uuid(),
-            "conversation_mode": {"kind": "primary_assistant"},
-            "conversation_origin": None,
-            "force_paragen": False,
-            "force_paragen_model_slug": "",
-            "force_rate_limit": False,
-            "force_use_sse": True,
-            "history_and_training_disabled": True,
-            "reset_rate_limits": False,
-            "suggestions": [],
-            "supported_encodings": [],
-            "system_hints": [],
-            "timezone": timezone,
-            "timezone_offset_min": -480,
-            "variant_purpose": "comparison_implicit",
-            "websocket_request_id": new_uuid(),
-            "client_contextual_info": {
-                "is_dark_mode": False,
-                "time_since_loaded": 120,
-                "page_height": 900,
-                "page_width": 1400,
-                "pixel_ratio": 2,
-                "screen_height": 1440,
-                "screen_width": 2560,
-            },
-        }
+        conversation_messages = self._api_messages_to_conversation_messages(messages)
+        if not self.access_token:
+            payload = {
+                "action": "next",
+                "messages": conversation_messages,
+                "model": model,
+                "parent_message_id": new_uuid(),
+                "conversation_mode": {"kind": "primary_assistant"},
+                "conversation_origin": None,
+                "force_paragen": False,
+                "force_paragen_model_slug": "",
+                "force_rate_limit": False,
+                "force_use_sse": True,
+                "history_and_training_disabled": True,
+                "reset_rate_limits": False,
+                "suggestions": [],
+                "supported_encodings": [],
+                "system_hints": list(system_hints or []),
+                "timezone": timezone,
+                "timezone_offset_min": -480,
+                "variant_purpose": "comparison_implicit",
+                "websocket_request_id": new_uuid(),
+                "client_contextual_info": {
+                    "is_dark_mode": False,
+                    "time_since_loaded": 120,
+                    "page_height": 900,
+                    "page_width": 1400,
+                    "pixel_ratio": 2,
+                    "screen_height": 1440,
+                    "screen_width": 2560,
+                },
+            }
+        else:
+            payload = {
+                "action": "next",
+                "messages": self._decorate_web_messages(conversation_messages),
+                "parent_message_id": "client-created-root",
+                "model": model,
+                "client_prepare_state": "success",
+                "timezone_offset_min": -480,
+                "timezone": timezone,
+                "conversation_mode": {"kind": "primary_assistant"},
+                "enable_message_followups": True,
+                "system_hints": list(system_hints or []),
+                "model_response_contracts": WEB_MODEL_RESPONSE_CONTRACTS,
+                "supports_buffering": True,
+                "supported_encodings": ["v1"],
+                "client_contextual_info": self._client_contextual_info(),
+                "paragen_cot_summary_display_override": "allow",
+                "force_parallel_switch": "auto",
+                "local_function_names": ["local.continue_in_work"],
+            }
         normalized_effort = self._normalize_thinking_effort(thinking_effort or config.default_thinking_effort)
         if normalized_effort:
             payload["thinking_effort"] = normalized_effort
@@ -602,18 +765,15 @@ class OpenAIBackendAPI:
 
     def _image_headers(self, path: str, requirements: ChatRequirements, conduit_token: str = "", accept: str = "*/*") -> \
             Dict[str, str]:
-        """构造图片链路请求头。"""
+        if accept == "text/event-stream":
+            return self._conversation_headers(path, requirements, conduit_token)
         headers = {
             "Content-Type": "application/json",
             "Accept": accept,
-            "OpenAI-Sentinel-Chat-Requirements-Token": requirements.token,
+            **self._sentinel_headers(requirements),
         }
-        if requirements.proof_token:
-            headers["OpenAI-Sentinel-Proof-Token"] = requirements.proof_token
         if conduit_token:
             headers["X-Conduit-Token"] = conduit_token
-        if accept == "text/event-stream":
-            headers["X-Oai-Turn-Trace-Id"] = new_uuid()
         return self._headers(path, headers)
 
     def _codex_responses_headers(self) -> Dict[str, str]:
@@ -886,38 +1046,8 @@ class OpenAIBackendAPI:
             raise UpstreamHTTPError(path, error.code, body, retry_after=retry_after) from error
 
     def _prepare_image_conversation(self, prompt: str, requirements: ChatRequirements, model: str) -> str:
-        """为图片生成准备 conduit token。"""
-        path = "/backend-api/f/conversation/prepare"
-        upstream_model, thinking_effort = self._image_model_settings(model)
-        payload = {
-            "action": "next",
-            "fork_from_shared_post": False,
-            "parent_message_id": new_uuid(),
-            "model": upstream_model,
-            "client_prepare_state": "success",
-            "timezone_offset_min": -480,
-            "timezone": "Asia/Shanghai",
-            "conversation_mode": {"kind": "primary_assistant"},
-            "system_hints": ["picture_v2"],
-            "partial_query": {
-                "id": new_uuid(),
-                "author": {"role": "user"},
-                "content": {"content_type": "text", "parts": [prompt]},
-            },
-            "supports_buffering": True,
-            "supported_encodings": ["v1"],
-            "client_contextual_info": {"app_name": "chatgpt.com"},
-        }
-        if thinking_effort:
-            payload["thinking_effort"] = thinking_effort
-        response = self.session.post(
-            self.base_url + path,
-            headers=self._image_headers(path, requirements),
-            json=payload,
-            timeout=60,
-        )
-        ensure_ok(response, path)
-        return response.json().get("conduit_token", "")
+        payload = self._image_conversation_payload(prompt, model, [])
+        return self._prepare_f_conversation(payload)
 
     def _decode_image_base64(self, image: str) -> bytes:
         """把 base64 图片字符串或本地路径解码成二进制。"""
@@ -993,12 +1123,15 @@ class OpenAIBackendAPI:
             "height": height,
         }
 
-    def _start_image_generation(self, prompt: str, requirements: ChatRequirements, conduit_token: str, model: str,
-                                references: Optional[list[Dict[str, Any]]] = None) -> requests.Response:
-        """启动图片生成或编辑的 SSE 请求。"""
+    def _image_conversation_payload(
+            self,
+            prompt: str,
+            model: str,
+            references: Optional[list[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         upstream_model, thinking_effort = self._image_model_settings(model)
         references = references or []
-        parts = [{
+        parts: list[Any] = [{
             "content_type": "image_asset_pointer",
             "asset_pointer": f"file-service://{item['file_id']}",
             "width": item["width"],
@@ -1006,14 +1139,19 @@ class OpenAIBackendAPI:
             "size_bytes": item["file_size"],
         } for item in references]
         parts.append(prompt)
-        content = {"content_type": "multimodal_text", "parts": parts} if references else {"content_type": "text",
-                                                                                          "parts": [prompt]}
+        content = (
+            {"content_type": "multimodal_text", "parts": parts}
+            if references else
+            {"content_type": "text", "parts": [prompt]}
+        )
         metadata = {
-            "developer_mode_connector_ids": [],
-            "selected_github_repos": [],
-            "selected_all_github_repos": False,
-            "system_hints": ["picture_v2"],
+            "automation_creation_attribution": {
+                "origin": "conversation",
+                "flow_id": new_uuid(),
+            },
             "serialization_metadata": {"custom_symbol_offsets": []},
+            "submission_mode": "manual_send",
+            "system_hints": ["picture_v2"],
         }
         if references:
             metadata["attachments"] = [{
@@ -1029,39 +1167,44 @@ class OpenAIBackendAPI:
             "messages": [{
                 "id": new_uuid(),
                 "author": {"role": "user"},
-                "create_time": time.time(),
+                "create_time": round(time.time(), 3),
                 "content": content,
                 "metadata": metadata,
             }],
-            "parent_message_id": new_uuid(),
+            "parent_message_id": "client-created-root",
             "model": upstream_model,
-            "client_prepare_state": "sent",
+            "client_prepare_state": "success",
             "timezone_offset_min": -480,
             "timezone": "Asia/Shanghai",
             "conversation_mode": {"kind": "primary_assistant"},
             "enable_message_followups": True,
             "system_hints": ["picture_v2"],
+            "model_response_contracts": WEB_MODEL_RESPONSE_CONTRACTS,
             "supports_buffering": True,
             "supported_encodings": ["v1"],
-            "client_contextual_info": {
-                "is_dark_mode": False,
-                "time_since_loaded": 1200,
-                "page_height": 1072,
-                "page_width": 1724,
-                "pixel_ratio": 1.2,
-                "screen_height": 1440,
-                "screen_width": 2560,
-                "app_name": "chatgpt.com",
-            },
+            "client_contextual_info": self._client_contextual_info(),
             "paragen_cot_summary_display_override": "allow",
             "force_parallel_switch": "auto",
+            "local_function_names": ["local.continue_in_work"],
         }
         if thinking_effort:
             payload["thinking_effort"] = thinking_effort
+        return payload
+
+    def _start_image_generation(
+            self,
+            prompt: str,
+            requirements: ChatRequirements,
+            conduit_token: str,
+            model: str,
+            references: Optional[list[Dict[str, Any]]] = None,
+            payload: Optional[Dict[str, Any]] = None,
+    ) -> requests.Response:
+        payload = payload or self._image_conversation_payload(prompt, model, references)
         path = "/backend-api/f/conversation"
         response = self.session.post(
             self.base_url + path,
-            headers=self._image_headers(path, requirements, conduit_token, "text/event-stream"),
+            headers=self._conversation_headers(path, requirements, conduit_token),
             json=payload,
             timeout=300,
             stream=True,
@@ -2596,11 +2739,30 @@ class OpenAIBackendAPI:
         normalized = messages or [{"role": "user", "content": prompt}]
         self._bootstrap()
         requirements = self._get_chat_requirements()
-        path, timezone = self._chat_target()
-        payload = self._conversation_payload(normalized, model, timezone, thinking_effort=thinking_effort)
+        if self.access_token:
+            payload = self._conversation_payload(
+                normalized,
+                model,
+                "Asia/Shanghai",
+                thinking_effort=thinking_effort,
+                system_hints=system_hints,
+            )
+            conduit_token = self._prepare_f_conversation(payload)
+            path = "/backend-api/f/conversation"
+            headers = self._conversation_headers(path, requirements, conduit_token)
+        else:
+            path, timezone = self._chat_target()
+            payload = self._conversation_payload(
+                normalized,
+                model,
+                timezone,
+                thinking_effort=thinking_effort,
+                system_hints=system_hints,
+            )
+            headers = self._conversation_headers(path, requirements)
         response = self.session.post(
             self.base_url + path,
-            headers=self._conversation_headers(path, requirements),
+            headers=headers,
             json=payload,
             timeout=300,
             stream=True,
@@ -2633,10 +2795,18 @@ class OpenAIBackendAPI:
         self._bootstrap()
         self._report_progress("getting_token")
         requirements = self._get_chat_requirements()
+        payload = self._image_conversation_payload(prompt, model, references)
         self._report_progress("preparing_conversation")
-        conduit_token = self._prepare_image_conversation(prompt, requirements, model)
+        conduit_token = self._prepare_f_conversation(payload)
         self._report_progress("starting_generation")
-        response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
+        response = self._start_image_generation(
+            prompt,
+            requirements,
+            conduit_token,
+            model,
+            references,
+            payload=payload,
+        )
         self._report_progress("generating")
         yield from self._iter_sse_payloads_capped(response, float(config.image_poll_timeout_secs))
 

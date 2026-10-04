@@ -145,6 +145,62 @@ def is_model_text_reply_instead_of_image(message: str) -> bool:
     return False
 
 
+def terminal_image_failure_message(*candidates: str) -> str:
+    """识别上游已经明确失败、不该再轮询图片的文本。"""
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if (
+            "generating images too quickly" in lowered
+            or "wait for an hour before generating more images" in lowered
+            or "未能生成图片" in text
+        ):
+            return text
+    return ""
+
+
+def image_message_error(
+    message: str,
+    *,
+    account_email: str = "",
+    conversation_id: str = "",
+) -> ImageGenerationError:
+    """把上游图片失败文本映射成对应的 API 错误，限流不再伪装成内容审核。"""
+    text = str(message or "").strip() or "Image generation was rejected by upstream policy."
+    lowered = text.lower()
+    if (
+        "generating images too quickly" in lowered
+        or "wait for an hour before generating more images" in lowered
+    ):
+        return ImageGenerationError(
+            text,
+            status_code=429,
+            error_type="rate_limit_error",
+            code="rate_limit_exceeded",
+            account_email=account_email,
+            conversation_id=conversation_id,
+        )
+    if "未能生成图片" in text:
+        return ImageGenerationError(
+            text,
+            status_code=502,
+            error_type="server_error",
+            code="upstream_error",
+            account_email=account_email,
+            conversation_id=conversation_id,
+        )
+    return ImageGenerationError(
+        text,
+        status_code=400,
+        error_type="invalid_request_error",
+        code="content_policy_violation",
+        account_email=account_email,
+        conversation_id=conversation_id,
+    )
+
+
 def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
     return [base64.b64encode(data).decode("ascii") for data, _, _ in images if data]
 
@@ -320,6 +376,7 @@ class ConversationState:
     blocked: bool = False
     tool_invoked: bool | None = None
     turn_use_case: str = ""
+    tool_error: str = ""
 
 
 @dataclass
@@ -579,6 +636,30 @@ def is_image_tool_event(event: dict[str, Any]) -> bool:
     )
 
 
+def tool_failure_text(event: dict[str, Any]) -> str:
+    """提取图片工具明确返回的失败文本，例如生图频率限制。"""
+    candidates: list[Any] = [event]
+    value = event.get("v")
+    if isinstance(value, dict):
+        candidates.append(value)
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        message = candidate.get("message")
+        if not isinstance(message, dict):
+            continue
+        author = message.get("author") or {}
+        metadata = message.get("metadata") or {}
+        if author.get("role") != "tool" or metadata.get("is_error") is not True:
+            continue
+        content = message.get("content") or {}
+        parts = content.get("parts") or []
+        text = "\n".join(part for part in parts if isinstance(part, str)).strip()
+        if terminal_image_failure_message(text):
+            return text
+    return ""
+
+
 def _is_user_message_event(event: dict[str, Any]) -> bool:
     """检查事件是否来自 user 角色消息。"""
     value = event.get("v")
@@ -627,6 +708,10 @@ def update_conversation_state(state: ConversationState, payload: str, event: dic
             if isinstance(metadata.get("tool_invoked"), bool):
                 state.tool_invoked = metadata["tool_invoked"]
             state.turn_use_case = str(metadata.get("turn_use_case") or state.turn_use_case)
+    if isinstance(event, dict):
+        failure = tool_failure_text(event)
+        if failure:
+            state.tool_error = failure
 
 
 def conversation_base_event(event_type: str, state: ConversationState, **extra: Any) -> dict[str, Any]:
@@ -639,6 +724,7 @@ def conversation_base_event(event_type: str, state: ConversationState, **extra: 
         "blocked": state.blocked,
         "tool_invoked": state.tool_invoked,
         "turn_use_case": state.turn_use_case,
+        "tool_error": state.tool_error,
         **extra,
     }
 
@@ -956,6 +1042,28 @@ def stream_image_outputs(
                 "conversation_id": conversation_id,
                 "error": detailed_error,
             })
+
+    # 频率限制和“未能生成图片”是终态。带参考图时不能再进入 120 秒轮询，
+    # 否则上游已经返回的失败会被超时错误盖住。
+    terminal_error = terminal_image_failure_message(
+        str(last.get("tool_error") or ""),
+        detailed_error,
+        message,
+    )
+    if terminal_error and not file_ids and not sediment_ids:
+        logger.info({
+            "event": "image_terminal_tool_error",
+            "conversation_id": conversation_id,
+        })
+        yield ImageOutput(
+            kind="message",
+            model=request.model,
+            index=index,
+            total=total,
+            text=terminal_error,
+            conversation_id=conversation_id,
+        )
+        return
 
     # 当检测到文本回复（含 referenced_image_ids）时，使用更长的超时来轮询图片结果。
     # 因为上游可能将图片生成作为异步任务执行，SSE 流在工具完成前就断开了，
@@ -1362,11 +1470,8 @@ def _generate_single_image(
                     if account_email and not output.account_email:
                         output.account_email = account_email
                     if output.kind == "message" and request.message_as_error:
-                        raise ImageGenerationError(
-                            output.text or "Image generation was rejected by upstream policy.",
-                            status_code=400,
-                            error_type="invalid_request_error",
-                            code="content_policy_violation",
+                        raise image_message_error(
+                            output.text,
                             account_email=account_email,
                             conversation_id=output.conversation_id,
                         )
