@@ -411,5 +411,25 @@ class ProxyServiceTests(unittest.TestCase):
         self.assertIsNotNone(results[0])
 
 
+
+class ChatGPTUpstreamProxyTests(unittest.TestCase):
+    def test_chatgpt_backend_uses_enabled_runtime_proxy(self) -> None:
+        from services.config import config
+        from services.openai_backend_api import OpenAIBackendAPI
+
+        runtime = make_runtime(
+            enabled=True,
+            egress_mode="single_proxy",
+            proxy_url="http://resin.example:8080",
+        )
+        with patch.object(config, "get_proxy_runtime_settings", return_value=runtime), \
+             patch.object(config, "get_proxy_settings", return_value=""):
+            backend = OpenAIBackendAPI()
+            try:
+                self.assertEqual(backend.session.proxies.get("all"), "http://resin.example:8080")
+            finally:
+                backend.close()
+
+
 if __name__ == "__main__":
     unittest.main()

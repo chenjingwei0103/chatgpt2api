@@ -356,7 +356,7 @@ class AccountService:
         from curl_cffi import requests
         from services.proxy_service import proxy_settings
 
-        session = requests.Session(**proxy_settings.build_session_kwargs(account=account, impersonate="chrome110", verify=True))
+        session = requests.Session(**proxy_settings.build_session_kwargs(account=account, impersonate="chrome110", verify=True, upstream=True))
         try:
             response = session.post(
                 self._OAUTH_TOKEN_URL,
@@ -585,7 +585,8 @@ class AccountService:
     def _login_with_password(self, email: str, password: str) -> dict:
         """通过邮箱+密码登录，返回 {access_token, refresh_token, id_token, ...}"""
         from curl_cffi import requests
-        
+        from services.proxy_service import proxy_settings
+
         # 常量
         auth_base = "https://auth.openai.com"
         platform_oauth_audience = "https://api.openai.com/v1"
@@ -595,11 +596,11 @@ class AccountService:
         user_agent = self._OAUTH_USER_AGENT
         
         # 创建 session
-        session_kwargs = {"impersonate": "chrome110", "verify": False}
-        proxy = config.get_proxy_settings()
-        if proxy:
-            session_kwargs["proxy"] = proxy
-        session = requests.Session(**session_kwargs)
+        session = requests.Session(**proxy_settings.build_session_kwargs(
+            impersonate="chrome110",
+            verify=False,
+            upstream=True,
+        ))
         
         try:
             device_id = str(uuid.uuid4())

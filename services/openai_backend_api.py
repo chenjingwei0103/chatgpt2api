@@ -225,6 +225,7 @@ class OpenAIBackendAPI:
             account=self.account,
             impersonate=self.fp["impersonate"],
             verify=True,
+            upstream=True,
         ))
         self.session.headers.update({
             "User-Agent": self.user_agent,
@@ -255,6 +256,16 @@ class OpenAIBackendAPI:
             self.session.headers["Cookie"] = cookie
         if self.access_token:
             self.session.headers["Authorization"] = f"Bearer {self.access_token}"
+
+        clearance_headers = proxy_settings.build_headers(
+            target_url=self.base_url,
+            account=self.account,
+            upstream=True,
+        )
+        if clearance_headers.get("Cookie"):
+            self.session.headers["Cookie"] = clearance_headers["Cookie"]
+        if clearance_headers.get("User-Agent"):
+            self.session.headers["User-Agent"] = clearance_headers["User-Agent"]
 
     def close(self) -> None:
         if getattr(self, "_closed", False):
