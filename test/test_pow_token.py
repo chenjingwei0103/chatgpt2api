@@ -15,10 +15,15 @@ _DATE_RE = re.compile(
 )
 
 
-def _decode_answer(token: str, prefix: str) -> tuple[str, list]:
-    if not token.startswith(prefix) or not token.endswith("~S"):
-        raise AssertionError("token prefix or suffix does not match the page SDK")
-    encoded = token[len(prefix):-2]
+def _decode_token(token: str, prefix: str, require_suffix_s: bool = True) -> tuple[str, list]:
+    if not token.startswith(prefix):
+        raise AssertionError(f"token prefix does not start with {prefix}")
+    if require_suffix_s:
+        if not token.endswith("~S"):
+            raise AssertionError("proof token must end with ~S")
+        encoded = token[len(prefix):-2]
+    else:
+        encoded = token[len(prefix):]
     payload = json.loads(base64.b64decode(encoded))
     return encoded, payload
 
@@ -34,8 +39,10 @@ class PowTokenTests(unittest.TestCase):
             "Mozilla/5.0 Chrome/154.0.0.0",
             data_build="prod-test",
         )
-        encoded, payload = _decode_answer(token, "gAAAAAC")
+        encoded, payload = _decode_token(token, "gAAAAAC", require_suffix_s=False)
         self.assertEqual(len(payload), 25)
+        self.assertEqual(payload[3], 1)
+        self.assertIsInstance(payload[9], float)
         self.assertEqual(payload[6], "prod-test")
         self._assert_page_config(payload)
         self.assertEqual(
@@ -55,7 +62,7 @@ class PowTokenTests(unittest.TestCase):
             script_sources=["https://chatgpt.com/backend-api/sentinel/sdk.js"],
             data_build="prod-test",
         )
-        encoded, payload = _decode_answer(token, "gAAAAAB")
+        encoded, payload = _decode_token(token, "gAAAAAB", require_suffix_s=True)
         digest = _fnv1a_mix(seed + encoded)
         self.assertLessEqual(digest[: len(difficulty)], difficulty)
         self.assertEqual(len(payload), 25)
@@ -78,4 +85,3 @@ class PowTokenTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -180,9 +180,29 @@ class UpstreamHTTPError(RuntimeError):
 def ensure_ok(response: requests.Response, context: str) -> None:
     if 200 <= response.status_code < 300:
         return
-    body: Any = response.text
+    body_text = ""
     try:
-        body = response.json()
+        body_text = response.text or ""
+    except Exception:
+        body_text = ""
+    if not str(body_text).strip():
+        try:
+            raw = response.content
+            if isinstance(raw, bytes):
+                body_text = raw.decode("utf-8", "replace")
+            elif raw:
+                body_text = str(raw)
+        except Exception:
+            body_text = ""
+    if not str(body_text).strip():
+        try:
+            raw = b"".join(response.iter_content() or [])
+            body_text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw or "")
+        except Exception:
+            pass
+    body: Any = body_text
+    try:
+        body = json.loads(body_text) if str(body_text).strip() else body_text
     except Exception:
         pass
     retry_after_header = response.headers.get("Retry-After") if hasattr(response, "headers") else None

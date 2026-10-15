@@ -236,11 +236,11 @@ def build_legacy_requirements_token(
     data_build: str = "",
 ) -> str:
     config = build_pow_config(user_agent, script_sources=script_sources, data_build=data_build)
-    # The page hashes a private Math.random() seed at difficulty "0".
-    answer, solved = _pow_generate(str(random.random()), "0", config)
-    if not solved:
-        raise RuntimeError("failed to solve requirements token")
-    return "gAAAAAC" + answer
+    config[3] = 1
+    config[9] = round(random.uniform(0.15, 0.45), 3)
+    raw = json.dumps(config, separators=(",", ":"), ensure_ascii=False)
+    encoded = pybase64.b64encode(raw.encode("utf-8")).decode("ascii")
+    return "gAAAAAC" + encoded
 
 
 def build_proof_token(

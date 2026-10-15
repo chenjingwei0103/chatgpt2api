@@ -29,6 +29,16 @@ from utils.pow import build_legacy_requirements_token, build_proof_token, parse_
 from utils.turnstile import solve_turnstile_token
 
 
+
+CLIENT_TIMEZONE = "UTC"
+
+
+def client_timezone_offset_min(moment: object | None = None) -> int:
+    """Return the JavaScript getTimezoneOffset() value used by the working web client."""
+    del moment
+    return 0
+
+
 class InvalidAccessTokenError(RuntimeError):
     pass
 
@@ -67,15 +77,15 @@ class ChatRequirements:
 
 DEFAULT_CLIENT_VERSION = "prod-e0e6637ebf1dbe024371aece17ddd0057b5734fa"
 DEFAULT_CLIENT_BUILD_NUMBER = "11735244"
-DEFAULT_CHROME_FULL_VERSION = "154.0.8037.93"
+DEFAULT_CHROME_FULL_VERSION = "155.0.8059.41"
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
 )
-DEFAULT_SEC_CH_UA = '"Chromium";v="154", "Google Chrome";v="154", "Not A(Brand";v="99"'
+DEFAULT_SEC_CH_UA = '"Google Chrome";v="155", "Chromium";v="155", "Not(A:Brand";v="24"'
 DEFAULT_SEC_CH_UA_FULL_VERSION_LIST = (
-    '"Chromium";v="154.0.8037.93", "Google Chrome";v="154.0.8037.93", '
-    '"Not A(Brand";v="99.0.0.0"'
+    '"Google Chrome";v="155.0.8059.41", "Chromium";v="155.0.8059.41", '
+    '"Not(A:Brand";v="24.0.0.0"'
 )
 DEFAULT_CLIENT_OBSERVATION = "v1.s.p.tvSvXZjdvc0We_rq"
 DEFAULT_IMPERSONATE = "chrome142"
@@ -324,20 +334,71 @@ class OpenAIBackendAPI:
         headers.setdefault("X-OpenAI-Web-Frontend", "core_web")
         headers.setdefault("OAI-GenUI-Client-Actions", "open_entity_detail,run_plugin_tool")
         headers.setdefault("X-OAI-Is-Client-Observation", DEFAULT_CLIENT_OBSERVATION)
+        account_id = self._chatgpt_account_id()
+        if account_id:
+            headers.setdefault("ChatGPT-Account-Id", account_id)
+        if self.device_id:
+            headers.setdefault("oai-did", self.device_id)
+        if extra:
+            headers.update(extra)
+        return headers
+
+    def _chatgpt_account_id(self) -> str:
+        cached = getattr(self, "_resolved_account_id", None)
+        if isinstance(cached, str):
+            return cached
+        if getattr(self, "_resolving_account_id", False):
+            return ""
+        account_id = str(self.account.get("account_id") or "").strip()
+        if not account_id:
+            payload = account_service._decode_jwt_payload(self.access_token)
+            auth = payload.get("https://api.openai.com/auth")
+            if isinstance(auth, dict):
+                account_id = str(auth.get("chatgpt_account_id") or "").strip()
+        if not account_id and self.access_token:
+            self._resolving_account_id = True
+            try:
+                account_id = str((self._get_default_account() or {}).get("account_id") or "").strip()
+            except Exception:
+                account_id = ""
+            finally:
+                self._resolving_account_id = False
+        self._resolved_account_id = account_id
+        return account_id
+
+    _CODEX_BROWSER_DROPPED_HEADERS = {
+        "oai-client-version",
+        "oai-client-build-number",
+        "oai-device-id",
+        "oai-session-id",
+        "oai-telemetry",
+    }
+
+    def _codex_browser_headers(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        """Headers from the working Codex browser conversation capture."""
+        headers = {
+            str(key): str(value)
+            for key, value in self.session.headers.items()
+            if str(key).lower() not in self._CODEX_BROWSER_DROPPED_HEADERS
+        }
+        headers["Accept"] = "*/*"
+        headers["Originator"] = "Codex Browser"
+        headers["X-OpenAI-Codex-Window-Type"] = "browser"
+        headers["X-OAI-Mcp-Form-Version"] = "2"
+        headers["X-OpenAI-Web-Frontend"] = "codex_webview"
+        if self.device_id:
+            headers["oai-did"] = self.device_id
+        account_id = self._chatgpt_account_id()
+        if account_id:
+            headers["ChatGPT-Account-Id"] = account_id
         if extra:
             headers.update(extra)
         return headers
 
     def _client_contextual_info(self) -> Dict[str, Any]:
         return {
-            "is_dark_mode": True,
-            "time_since_loaded": max(1, int(time.monotonic())),
-            "page_height": 653,
-            "page_width": 1541,
-            "pixel_ratio": 1,
-            "screen_height": 2160,
-            "screen_width": 3840,
             "app_name": "chatgpt.com",
+            "app_surface": "codex_browser",
             "has_web_push_capabilities": True,
             "web_push_notification_permission": "default",
         }
@@ -361,7 +422,7 @@ class OpenAIBackendAPI:
             "OAI-Echo-Logs": self._oai_echo_logs(),
             "OAI-Telemetry": self._oai_telemetry(),
             "X-OAI-Turn-Trace-Id": new_uuid(),
-            "X-OpenAI-Web-SSE-Compression": "identity",
+            "X-OpenAI-Web-SSE-Compression": "gzip",
         }
 
     @staticmethod
@@ -378,8 +439,8 @@ class OpenAIBackendAPI:
         return headers
 
     def _prepare_headers(self, path: str, conduit_token: str = "no-token") -> Dict[str, str]:
-        return self._headers(path, {
-            "Accept": "*/*",
+        del path
+        return self._codex_browser_headers({
             "Content-Type": "application/json",
             "X-Conduit-Token": conduit_token or "no-token",
             "X-OAI-Turn-Trace-Id": new_uuid(),
@@ -389,28 +450,25 @@ class OpenAIBackendAPI:
         messages = payload.get("messages") or []
         last = messages[-1] if messages else {}
         body = {
+            "client_prepare_state": "sent",
             "action": "next",
-            "fork_from_shared_post": False,
-            "parent_message_id": payload.get("parent_message_id") or "client-created-root",
+            "is_do_not_remember": False,
             "model": payload.get("model") or "auto",
-            "client_prepare_state": "success",
-            "timezone_offset_min": payload.get("timezone_offset_min", -480),
-            "timezone": payload.get("timezone") or "Asia/Shanghai",
-            "conversation_mode": payload.get("conversation_mode") or {"kind": "primary_assistant"},
-            "enable_message_followups": True,
-            "system_hints": list(payload.get("system_hints") or []),
-            "model_response_contracts": payload.get("model_response_contracts") or WEB_MODEL_RESPONSE_CONTRACTS,
+            "parent_message_id": payload.get("parent_message_id") or "client-created-root",
+            "timezone": payload.get("timezone") or CLIENT_TIMEZONE,
+            "timezone_offset_min": payload.get("timezone_offset_min", client_timezone_offset_min()),
             "partial_query": {
-                "id": last.get("id") or new_uuid(),
-                "author": last.get("author") or {"role": "user"},
+                "author": {"role": (last.get("author") or {}).get("role") or "user"},
                 "content": last.get("content") or {"content_type": "text", "parts": [""]},
+                "id": last.get("id") or new_uuid(),
             },
-            "supports_buffering": True,
-            "supported_encodings": ["v1"],
-            "client_contextual_info": payload.get("client_contextual_info") or self._client_contextual_info(),
+            "client_prepare_dispatch": "immediate",
+            "client_prepare_source": "context_change",
         }
         if payload.get("conversation_id"):
             body["conversation_id"] = payload["conversation_id"]
+        if payload.get("local_function_names"):
+            body["local_function_names"] = payload["local_function_names"]
         if payload.get("thinking_effort"):
             body["thinking_effort"] = payload["thinking_effort"]
         return body
@@ -457,7 +515,7 @@ class OpenAIBackendAPI:
                 "gizmo_id": None,
                 "requested_default_model": None,
                 "conversation_id": None,
-                "timezone_offset_min": -480,
+                "timezone_offset_min": client_timezone_offset_min(),
             },
             timeout=20,
         )
@@ -467,7 +525,7 @@ class OpenAIBackendAPI:
 
     def _get_default_account(self) -> Dict[str, Any]:
         path = "/backend-api/accounts/check/v4-2023-04-27"
-        response = self.session.get(self.base_url + path + "?timezone_offset_min=-480", headers=self._headers(path),
+        response = self.session.get(self.base_url + path + f"?timezone_offset_min={client_timezone_offset_min()}", headers=self._headers(path),
                                     timeout=20)
         if response.status_code != 200:
             self._raise_on_error(response, path)
@@ -581,15 +639,17 @@ class OpenAIBackendAPI:
             requirements: ChatRequirements,
             conduit_token: str = "",
     ) -> Dict[str, str]:
-        headers = {
-            "Accept": "text/event-stream",
+        del path
+        headers = self._codex_browser_headers({
             "Content-Type": "application/json",
+            "OAI-Echo-Logs": self._oai_echo_logs(),
+            "X-OAI-Turn-Trace-Id": new_uuid(),
+            "X-OpenAI-Web-SSE-Compression": "gzip",
             **self._sentinel_headers(requirements),
-            **self._web_metric_headers(),
-        }
+        })
         if conduit_token:
             headers["X-Conduit-Token"] = conduit_token
-        return self._headers(path, headers)
+        return headers
 
     def _api_messages_to_conversation_messages(self, messages: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
         """把标准 chat messages 转成 web conversation 所需的 messages。"""
@@ -718,7 +778,7 @@ class OpenAIBackendAPI:
                 "supported_encodings": [],
                 "system_hints": list(system_hints or []),
                 "timezone": timezone,
-                "timezone_offset_min": -480,
+                "timezone_offset_min": client_timezone_offset_min(),
                 "variant_purpose": "comparison_implicit",
                 "websocket_request_id": new_uuid(),
                 "client_contextual_info": {
@@ -738,7 +798,7 @@ class OpenAIBackendAPI:
                 "parent_message_id": "client-created-root",
                 "model": model,
                 "client_prepare_state": "success",
-                "timezone_offset_min": -480,
+                "timezone_offset_min": client_timezone_offset_min(),
                 "timezone": timezone,
                 "conversation_mode": {"kind": "primary_assistant"},
                 "enable_message_followups": True,
@@ -1155,15 +1215,7 @@ class OpenAIBackendAPI:
             if references else
             {"content_type": "text", "parts": [prompt]}
         )
-        metadata = {
-            "automation_creation_attribution": {
-                "origin": "conversation",
-                "flow_id": new_uuid(),
-            },
-            "serialization_metadata": {"custom_symbol_offsets": []},
-            "submission_mode": "manual_send",
-            "system_hints": ["picture_v2"],
-        }
+        metadata: Dict[str, Any] = {}
         if references:
             metadata["attachments"] = [{
                 "id": item["file_id"],
@@ -1173,30 +1225,30 @@ class OpenAIBackendAPI:
                 "width": item["width"],
                 "height": item["height"],
             } for item in references]
+        message_id = new_uuid()
         payload = {
             "action": "next",
-            "messages": [{
-                "id": new_uuid(),
-                "author": {"role": "user"},
-                "create_time": round(time.time(), 3),
-                "content": content,
-                "metadata": metadata,
-            }],
-            "parent_message_id": "client-created-root",
+            "is_do_not_remember": False,
             "model": upstream_model,
-            "client_prepare_state": "success",
-            "timezone_offset_min": -480,
-            "timezone": "Asia/Shanghai",
-            "conversation_mode": {"kind": "primary_assistant"},
-            "enable_message_followups": True,
-            "system_hints": ["picture_v2"],
-            "model_response_contracts": WEB_MODEL_RESPONSE_CONTRACTS,
-            "supports_buffering": True,
-            "supported_encodings": ["v1"],
+            "parent_message_id": "client-created-root",
+            "timezone": CLIENT_TIMEZONE,
+            "timezone_offset_min": client_timezone_offset_min(),
             "client_contextual_info": self._client_contextual_info(),
-            "paragen_cot_summary_display_override": "allow",
-            "force_parallel_switch": "auto",
-            "local_function_names": ["local.continue_in_work"],
+            "messages": [{
+                "author": {"metadata": {}, "name": None, "role": "user"},
+                "channel": None,
+                "content": content,
+                "create_time": round(time.time(), 3),
+                "end_turn": None,
+                "id": message_id,
+                "metadata": metadata,
+                "recipient": "all",
+                "status": "finished_successfully",
+                "update_time": None,
+                "weight": 1,
+            }],
+            "supported_encodings": ["v1"],
+            "client_prepare_state": "success",
         }
         if thinking_effort:
             payload["thinking_effort"] = thinking_effort
@@ -1213,15 +1265,41 @@ class OpenAIBackendAPI:
     ) -> requests.Response:
         payload = payload or self._image_conversation_payload(prompt, model, references)
         path = "/backend-api/f/conversation"
-        response = self.session.post(
+        response = self._post_image_conversation(path, requirements, conduit_token, payload)
+        if self._response_says_model_not_found(response) and payload.get("model") == "auto":
+            response.close()
+            payload = dict(payload)
+            payload["model"] = "gpt-6-mini"
+            conduit_token = self._prepare_f_conversation(payload)
+            response = self._post_image_conversation(path, requirements, conduit_token, payload)
+        ensure_ok(response, path)
+        return response
+
+    def _post_image_conversation(
+            self,
+            path: str,
+            requirements: ChatRequirements,
+            conduit_token: str,
+            payload: Dict[str, Any],
+    ) -> requests.Response:
+        return self.session.post(
             self.base_url + path,
             headers=self._conversation_headers(path, requirements, conduit_token),
             json=payload,
             timeout=300,
             stream=True,
         )
-        ensure_ok(response, path)
-        return response
+
+    @staticmethod
+    def _response_says_model_not_found(response: requests.Response) -> bool:
+        if getattr(response, "status_code", 0) != 404:
+            return False
+        try:
+            raw = b"".join(response.iter_content() or [])
+            text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw or "")
+        except Exception:
+            return False
+        return "Model not found" in text
 
     def _get_conversation(self, conversation_id: str) -> Dict[str, Any]:
         """获取完整 conversation 详情。"""
@@ -1448,7 +1526,7 @@ class OpenAIBackendAPI:
                 "file_name": file_name,
                 "file_size": len(data),
                 "use_case": "multimodal",
-                "timezone_offset_min": -480,
+                "timezone_offset_min": client_timezone_offset_min(),
                 "reset_rate_limits": False,
                 "store_in_library": True,
                 "library_persistence_mode": "opportunistic",
@@ -1521,8 +1599,8 @@ class OpenAIBackendAPI:
             "parent_message_id": "client-created-root",
             "model": EDITABLE_FILE_MODEL,
             "client_prepare_state": "success",
-            "timezone_offset_min": -480,
-            "timezone": "Asia/Shanghai",
+            "timezone_offset_min": client_timezone_offset_min(),
+            "timezone": CLIENT_TIMEZONE,
             "conversation_mode": {"kind": "primary_assistant"},
             "system_hints": [],
             "partial_query": {"id": new_uuid(), "author": {"role": "user"}, "content": {"content_type": "text", "parts": [prompt]}},
@@ -1589,8 +1667,8 @@ class OpenAIBackendAPI:
                 "parent_message_id": "client-created-root",
                 "model": EDITABLE_FILE_MODEL,
                 "client_prepare_state": "sent",
-                "timezone_offset_min": -480,
-                "timezone": "Asia/Shanghai",
+                "timezone_offset_min": client_timezone_offset_min(),
+                "timezone": CLIENT_TIMEZONE,
                 "conversation_mode": {"kind": "primary_assistant"},
                 "enable_message_followups": True,
                 "system_hints": [],
@@ -2019,8 +2097,8 @@ class OpenAIBackendAPI:
                 "parent_message_id": "client-created-root",
                 "model": model,
                 "client_prepare_state": "success",
-                "timezone_offset_min": -480,
-                "timezone": "Asia/Shanghai",
+                "timezone_offset_min": client_timezone_offset_min(),
+                "timezone": CLIENT_TIMEZONE,
                 "conversation_mode": {"kind": "primary_assistant"},
                 "system_hints": ["search"],
                 "partial_query": {"id": new_uuid(), "author": {"role": "user"}, "content": {"content_type": "text", "parts": [prompt]}},
@@ -2060,8 +2138,8 @@ class OpenAIBackendAPI:
                 "parent_message_id": "client-created-root",
                 "model": model,
                 "client_prepare_state": "success",
-                "timezone_offset_min": -480,
-                "timezone": "Asia/Shanghai",
+                "timezone_offset_min": client_timezone_offset_min(),
+                "timezone": CLIENT_TIMEZONE,
                 "conversation_mode": {"kind": "primary_assistant"},
                 "enable_message_followups": True,
                 "system_hints": [],
@@ -2754,7 +2832,7 @@ class OpenAIBackendAPI:
             payload = self._conversation_payload(
                 normalized,
                 model,
-                "Asia/Shanghai",
+                CLIENT_TIMEZONE,
                 thinking_effort=thinking_effort,
                 system_hints=system_hints,
             )
@@ -2855,16 +2933,21 @@ class OpenAIBackendAPI:
                 pass
 
     def _bootstrap(self) -> None:
-        """预热首页，并提取 PoW 相关脚本引用。"""
-        response = self.session.get(
-            self.base_url + "/",
-            headers=self._bootstrap_headers(),
-            timeout=30,
-        )
-        ensure_ok(response, "bootstrap")
-        self.pow_script_sources, self.pow_data_build = parse_pow_resources(response.text)
-        if not self.pow_script_sources:
-            self.pow_script_sources = [DEFAULT_POW_SCRIPT]
+        """预加载网页，获取 PoW 相关脚本配置（匿名请求，避免带 Authorization 触发 CF 挑战）。"""
+        auth_header = self.session.headers.pop("Authorization", None)
+        try:
+            response = self.session.get(
+                self.base_url + "/",
+                headers=self._bootstrap_headers(),
+                timeout=30,
+            )
+            ensure_ok(response, "bootstrap")
+            self.pow_script_sources, self.pow_data_build = parse_pow_resources(response.text)
+            if not self.pow_script_sources:
+                self.pow_script_sources = [DEFAULT_POW_SCRIPT]
+        finally:
+            if auth_header is not None:
+                self.session.headers["Authorization"] = auth_header
 
     def _get_chat_requirements(self) -> ChatRequirements:
         """获取当前模式对话所需的 sentinel token（prepare + finalize 两步流程）。"""
@@ -2901,17 +2984,27 @@ class OpenAIBackendAPI:
             turnstile_token = solve_turnstile_token(turnstile_info["dx"], p_token) or ""
 
         finalize_path = base + "/finalize"
+        finalize_payload = {
+            "prepare_token": prepare_data.get("prepare_token", ""),
+        }
+        if proof_token:
+            finalize_payload["proofofwork"] = proof_token
+        if turnstile_token:
+            finalize_payload["turnstile"] = turnstile_token
+
         response = self.session.post(
             self.base_url + finalize_path,
             headers=self._headers(finalize_path, {"Content-Type": "application/json"}),
-            json={
-                "prepare_token": prepare_data.get("prepare_token", ""),
-                "proof_token": proof_token,
-                "turnstile_token": turnstile_token,
-            },
+            json=finalize_payload,
             timeout=30,
         )
         ensure_ok(response, "chat_requirements_finalize")
+        if hasattr(self.session, "cookies") and hasattr(self.session.cookies, "delete"):
+            try:
+                self.session.cookies.delete("oai-sc", domain="chatgpt.com")
+                self.session.cookies.delete("oai-sc", domain=".chatgpt.com")
+            except Exception:
+                pass
         data = response.json()
 
         token = data.get("token", "")
@@ -2929,7 +3022,7 @@ class OpenAIBackendAPI:
 
     def _chat_target(self) -> tuple[str, str]:
         if self.access_token:
-            return "/backend-api/conversation", "Asia/Shanghai"
+            return "/backend-api/conversation", CLIENT_TIMEZONE
         return "/backend-anon/conversation", "America/Los_Angeles"
 
     def list_models(self) -> Dict[str, Any]:
