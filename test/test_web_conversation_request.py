@@ -194,7 +194,7 @@ class WebConversationRequestTest(unittest.TestCase):
         backend._get_default_account.assert_called_once()
 
 
-    def test_auto_model_not_found_retries_with_concrete_model(self) -> None:
+    def test_auto_model_not_found_raises_without_model_fallback(self) -> None:
         calls = []
 
         class _ErrorResponse(_Response):
@@ -222,13 +222,15 @@ class WebConversationRequestTest(unittest.TestCase):
         backend.session.post = fake_post
         payload = backend._image_conversation_payload("draw a circle", "gpt-image-2", [])
         payload["model"] = "auto"
-        backend._start_image_generation("draw a circle", self._requirements(), "conduit-1", "gpt-image-2", [], payload)
+        from utils.helper import ModelNotFoundError
+        with self.assertRaises(ModelNotFoundError):
+            backend._start_image_generation("draw a circle", self._requirements(), "conduit-1", "gpt-image-2", [], payload)
         conversation_models = [
             call["json"].get("model")
             for call in calls
             if call["url"].endswith("/conversation")
         ]
-        self.assertEqual(conversation_models, ["auto", "gpt-6-mini"])
+        self.assertEqual(conversation_models, ["auto"])
 
 
 if __name__ == "__main__":

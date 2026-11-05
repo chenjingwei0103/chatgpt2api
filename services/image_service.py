@@ -58,7 +58,11 @@ def get_image_response(relative_path: str) -> FileResponse | Response:
     }
     if image_storage_service.has_local(relative_path):
         return FileResponse(_safe_image_path(relative_path), headers=headers)
-    return Response(content=image_storage_service.get_bytes(relative_path), media_type="image/png", headers=headers)
+    return Response(
+        content=image_storage_service.get_bytes(relative_path),
+        media_type=image_storage_service.content_type(relative_path),
+        headers=headers,
+    )
 
 
 def _thumbnail_path(relative_path: str) -> Path:
@@ -130,7 +134,7 @@ def get_image_download_response(relative_path: str) -> FileResponse:
     }
     return Response(
         content=image_storage_service.get_bytes(rel),
-        media_type="image/png",
+        media_type=image_storage_service.content_type(rel),
         headers=headers,
     )
 

@@ -504,8 +504,11 @@ class ImageTaskService:
                 raise RuntimeError("图片 URL 解析失败")
 
             image_items = [
-                {"b64_json": __import__("base64").b64encode(image_data).decode("ascii")}
-                for image_data in backend.download_image_bytes(image_urls)
+                {
+                    "b64_json": __import__("base64").b64encode(image_data).decode("ascii"),
+                    "mime_type": mime_type,
+                }
+                for image_data, mime_type in backend.download_image_parts(image_urls)
             ]
             # 获取 task 的原始 prompt（从 _public_task 的 mode 判断）
             with self._lock:

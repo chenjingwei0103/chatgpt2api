@@ -23,7 +23,8 @@ from PIL import Image
 from services.account_service import account_service
 from services.config import config
 from services.proxy_service import proxy_settings
-from utils.helper import UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid, split_image_model
+from services.sentinel_solver_client import solve_turnstile, solver_user_agent
+from utils.helper import ModelNotFoundError, UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid, split_image_model
 from utils.log import logger
 from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
 from utils.turnstile import solve_turnstile_token
@@ -34,7 +35,7 @@ CLIENT_TIMEZONE = "UTC"
 
 
 def client_timezone_offset_min(moment: object | None = None) -> int:
-    """Return the JavaScript getTimezoneOffset() value used by the working web client."""
+    # Matches the HAR request body from the working web client (timezone=UTC, offset=0).
     del moment
     return 0
 
@@ -99,6 +100,7 @@ WEB_MODEL_RESPONSE_CONTRACTS = [
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
 CODEX_IMAGE_MODEL_25 = "codex-gpt-image-2.5"
+CODEX_IMAGE_MODEL_26 = "codex-gpt-image-2.6"
 CODEX_IMAGE_MODEL_25_TOOL_NAMES = {"gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
 CODEX_IMAGE_QUALITY_TIERS = {"auto", "low", "medium", "high"}
 CODEX_IMAGE_25_QUALITY_TIERS = CODEX_IMAGE_QUALITY_TIERS | {"xhigh", "max"}
@@ -438,13 +440,14 @@ class OpenAIBackendAPI:
             headers["OpenAI-Sentinel-SO-Token"] = requirements.so_token
         return headers
 
-    def _prepare_headers(self, path: str, conduit_token: str = "no-token") -> Dict[str, str]:
+    def _prepare_headers(self, path: str, conduit_token: str = "no-token", trace_id: str = "") -> Dict[str, str]:
         del path
-        return self._codex_browser_headers({
+        headers = {
             "Content-Type": "application/json",
             "X-Conduit-Token": conduit_token or "no-token",
-            "X-OAI-Turn-Trace-Id": new_uuid(),
-        })
+            "X-OAI-Turn-Trace-Id": trace_id or new_uuid(),
+        }
+        return self._codex_browser_headers(headers)
 
     def _prepare_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         messages = payload.get("messages") or []
@@ -473,11 +476,11 @@ class OpenAIBackendAPI:
             body["thinking_effort"] = payload["thinking_effort"]
         return body
 
-    def _prepare_f_conversation(self, payload: Dict[str, Any]) -> str:
+    def _prepare_f_conversation(self, payload: Dict[str, Any], trace_id: str = "") -> str:
         path = "/backend-api/f/conversation/prepare"
         response = self.session.post(
             self.base_url + path,
-            headers=self._prepare_headers(path),
+            headers=self._prepare_headers(path, trace_id=trace_id),
             json=self._prepare_payload(payload),
             timeout=60,
         )
@@ -623,7 +626,10 @@ class OpenAIBackendAPI:
         turnstile_token = ""
         turnstile_info = data.get("turnstile") or {}
         if turnstile_info.get("required") and turnstile_info.get("dx"):
-            turnstile_token = solve_turnstile_token(turnstile_info["dx"], source_p) or ""
+            if config.sentinel_solver_url:
+                turnstile_token = solve_turnstile(turnstile_info["dx"], source_p, data)
+            else:
+                turnstile_token = solve_turnstile_token(turnstile_info["dx"], source_p) or ""
 
         return ChatRequirements(
             token=data.get("token", ""),
@@ -638,12 +644,13 @@ class OpenAIBackendAPI:
             path: str,
             requirements: ChatRequirements,
             conduit_token: str = "",
+            trace_id: str = "",
     ) -> Dict[str, str]:
         del path
         headers = self._codex_browser_headers({
             "Content-Type": "application/json",
             "OAI-Echo-Logs": self._oai_echo_logs(),
-            "X-OAI-Turn-Trace-Id": new_uuid(),
+            "X-OAI-Turn-Trace-Id": trace_id or new_uuid(),
             "X-OpenAI-Web-SSE-Compression": "gzip",
             **self._sentinel_headers(requirements),
         })
@@ -825,7 +832,12 @@ class OpenAIBackendAPI:
             upstream_model = config.default_upstream_model_name
         elif base_model == "gpt-image-2.5":
             upstream_model = config.default_upstream_model_name_25 or config.default_upstream_model_name
-        elif base_model in {CODEX_IMAGE_MODEL, CODEX_IMAGE_MODEL_25}:
+        elif base_model == "gpt-image-2.6":
+            # The current Web image flow submits model=auto; keep an explicit
+            # 2.6 override available, but do not inherit the legacy 2.5/default
+            # model name when the setting is absent.
+            upstream_model = config.default_upstream_model_name_26 or "auto"
+        elif base_model in {CODEX_IMAGE_MODEL, CODEX_IMAGE_MODEL_25, CODEX_IMAGE_MODEL_26}:
             upstream_model = base_model
         else:
             return "auto", ""
@@ -1262,16 +1274,15 @@ class OpenAIBackendAPI:
             model: str,
             references: Optional[list[Dict[str, Any]]] = None,
             payload: Optional[Dict[str, Any]] = None,
+            trace_id: str = "",
     ) -> requests.Response:
+        trace_id = trace_id or new_uuid()
         payload = payload or self._image_conversation_payload(prompt, model, references)
         path = "/backend-api/f/conversation"
-        response = self._post_image_conversation(path, requirements, conduit_token, payload)
-        if self._response_says_model_not_found(response) and payload.get("model") == "auto":
+        response = self._post_image_conversation(path, requirements, conduit_token, payload, trace_id=trace_id)
+        if payload.get("model") == "auto" and self._response_says_model_not_found(response):
             response.close()
-            payload = dict(payload)
-            payload["model"] = "gpt-6-mini"
-            conduit_token = self._prepare_f_conversation(payload)
-            response = self._post_image_conversation(path, requirements, conduit_token, payload)
+            raise ModelNotFoundError(path, 404, {"detail": "Model not found"})
         ensure_ok(response, path)
         return response
 
@@ -1281,10 +1292,11 @@ class OpenAIBackendAPI:
             requirements: ChatRequirements,
             conduit_token: str,
             payload: Dict[str, Any],
+            trace_id: str = "",
     ) -> requests.Response:
         return self.session.post(
             self.base_url + path,
-            headers=self._conversation_headers(path, requirements, conduit_token),
+            headers=self._conversation_headers(path, requirements, conduit_token, trace_id=trace_id),
             json=payload,
             timeout=300,
             stream=True,
@@ -1299,7 +1311,11 @@ class OpenAIBackendAPI:
             text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw or "")
         except Exception:
             return False
-        return "Model not found" in text
+        try:
+            detail = json.loads(text).get("detail")
+        except Exception:
+            return False
+        return detail == "Model not found"
 
     def _get_conversation(self, conversation_id: str) -> Dict[str, Any]:
         """获取完整 conversation 详情。"""
@@ -2802,14 +2818,21 @@ class OpenAIBackendAPI:
                 sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
         return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
 
-    def download_image_bytes(self, urls: list[str]) -> list[bytes]:
-        images = []
+    def download_image_parts(self, urls: list[str]) -> list[tuple[bytes, str]]:
+        images: list[tuple[bytes, str]] = []
         for url in urls:
             response = self.session.get(url, timeout=120)
             ensure_ok(response, "image_download")
-            if response.content not in images:
-                images.append(response.content)
+            payload = bytes(response.content)
+            content_type = str(response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+            if not content_type.startswith("image/"):
+                content_type = ""
+            if (payload, content_type) not in images:
+                images.append((payload, content_type))
         return images
+
+    def download_image_bytes(self, urls: list[str]) -> list[bytes]:
+        return [payload for payload, _ in self.download_image_parts(urls)]
 
     def stream_conversation(
             self,
@@ -2829,6 +2852,7 @@ class OpenAIBackendAPI:
         self._bootstrap()
         requirements = self._get_chat_requirements()
         if self.access_token:
+            trace_id = new_uuid()
             payload = self._conversation_payload(
                 normalized,
                 model,
@@ -2836,9 +2860,9 @@ class OpenAIBackendAPI:
                 thinking_effort=thinking_effort,
                 system_hints=system_hints,
             )
-            conduit_token = self._prepare_f_conversation(payload)
+            conduit_token = self._prepare_f_conversation(payload, trace_id=trace_id)
             path = "/backend-api/f/conversation"
-            headers = self._conversation_headers(path, requirements, conduit_token)
+            headers = self._conversation_headers(path, requirements, conduit_token, trace_id=trace_id)
         else:
             path, timezone = self._chat_target()
             payload = self._conversation_payload(
@@ -2933,71 +2957,93 @@ class OpenAIBackendAPI:
                 pass
 
     def _bootstrap(self) -> None:
-        """预加载网页，获取 PoW 相关脚本配置（匿名请求，避免带 Authorization 触发 CF 挑战）。"""
+        """预加载网页，获取 PoW 相关脚本配置（若主页被 CF 拦截则安全降级到默认配置）。"""
         auth_header = self.session.headers.pop("Authorization", None)
         try:
             response = self.session.get(
                 self.base_url + "/",
                 headers=self._bootstrap_headers(),
-                timeout=30,
+                timeout=15,
             )
-            ensure_ok(response, "bootstrap")
-            self.pow_script_sources, self.pow_data_build = parse_pow_resources(response.text)
+            if response.status_code == 200:
+                self.pow_script_sources, self.pow_data_build = parse_pow_resources(response.text)
+        except Exception:
+            pass
+        finally:
             if not self.pow_script_sources:
                 self.pow_script_sources = [DEFAULT_POW_SCRIPT]
-        finally:
+            if not self.pow_data_build:
+                self.pow_data_build = "35feeb1b19497fee44ca7964f47ec8f571d87a70"
             if auth_header is not None:
                 self.session.headers["Authorization"] = auth_header
 
     def _get_chat_requirements(self) -> ChatRequirements:
         """获取当前模式对话所需的 sentinel token（prepare + finalize 两步流程）。"""
         base = "/backend-api/sentinel/chat-requirements" if self.access_token else "/backend-anon/sentinel/chat-requirements"
-        p_token = build_legacy_requirements_token(self.user_agent, self.pow_script_sources, self.pow_data_build)
+        sentinel_ua = solver_user_agent() or self.user_agent
+        if sentinel_ua and sentinel_ua != self.user_agent:
+            self.user_agent = sentinel_ua
+            self.session.headers["User-Agent"] = sentinel_ua
+        p_token = build_legacy_requirements_token(sentinel_ua, self.pow_script_sources, self.pow_data_build)
 
-        prepare_path = base + "/prepare"
-        response = self.session.post(
-            self.base_url + prepare_path,
-            headers=self._headers(prepare_path, {"Content-Type": "application/json"}),
-            json={"p": p_token},
-            timeout=30,
-        )
-        ensure_ok(response, "chat_requirements_prepare")
-        prepare_data = response.json()
+        auth_header = self.session.headers.pop("Authorization", None)
+        try:
+            prepare_path = base + "/prepare"
+            req_headers = self._codex_browser_headers({"Content-Type": "application/json"})
+            req_headers.pop("Authorization", None)
+            req_headers.pop("authorization", None)
 
-        if (prepare_data.get("arkose") or {}).get("required"):
-            raise RuntimeError("chat requirements requires arkose token, which is not implemented")
-
-        proof_token = ""
-        proof_info = prepare_data.get("proofofwork") or {}
-        if proof_info.get("required"):
-            proof_token = build_proof_token(
-                proof_info.get("seed", ""),
-                proof_info.get("difficulty", ""),
-                self.user_agent,
-                script_sources=self.pow_script_sources,
-                data_build=self.pow_data_build,
+            response = self.session.post(
+                self.base_url + prepare_path,
+                headers=req_headers,
+                json={"p": p_token},
+                timeout=30,
             )
+            ensure_ok(response, "chat_requirements_prepare")
+            prepare_data = response.json()
 
-        turnstile_token = ""
-        turnstile_info = prepare_data.get("turnstile") or {}
-        if turnstile_info.get("required") and turnstile_info.get("dx"):
-            turnstile_token = solve_turnstile_token(turnstile_info["dx"], p_token) or ""
+            if (prepare_data.get("arkose") or {}).get("required"):
+                raise RuntimeError("chat requirements requires arkose token, which is not implemented")
 
-        finalize_path = base + "/finalize"
-        finalize_payload = {
-            "prepare_token": prepare_data.get("prepare_token", ""),
-        }
-        if proof_token:
-            finalize_payload["proofofwork"] = proof_token
-        if turnstile_token:
-            finalize_payload["turnstile"] = turnstile_token
+            proof_token = ""
+            proof_info = prepare_data.get("proofofwork") or {}
+            if proof_info.get("required"):
+                proof_token = build_proof_token(
+                    proof_info.get("seed", ""),
+                    proof_info.get("difficulty", ""),
+                    sentinel_ua,
+                    script_sources=self.pow_script_sources,
+                    data_build=self.pow_data_build,
+                )
 
-        response = self.session.post(
-            self.base_url + finalize_path,
-            headers=self._headers(finalize_path, {"Content-Type": "application/json"}),
-            json=finalize_payload,
-            timeout=30,
-        )
+            turnstile_token = ""
+            turnstile_info = prepare_data.get("turnstile") or {}
+            if turnstile_info.get("required") and turnstile_info.get("dx"):
+                if config.sentinel_solver_url:
+                    turnstile_token = solve_turnstile(turnstile_info["dx"], p_token, prepare_data)
+                else:
+                    turnstile_token = solve_turnstile_token(turnstile_info["dx"], p_token) or ""
+
+            finalize_path = base + "/finalize"
+            finalize_payload = {
+                "prepare_token": prepare_data.get("prepare_token", ""),
+                "proofofwork": proof_token,
+                "turnstile": turnstile_token,
+            }
+
+            fin_headers = self._codex_browser_headers({"Content-Type": "application/json"})
+            fin_headers.pop("Authorization", None)
+            fin_headers.pop("authorization", None)
+
+            response = self.session.post(
+                self.base_url + finalize_path,
+                headers=fin_headers,
+                json=finalize_payload,
+                timeout=30,
+            )
+        finally:
+            if auth_header is not None:
+                self.session.headers["Authorization"] = auth_header
         ensure_ok(response, "chat_requirements_finalize")
         if hasattr(self.session, "cookies") and hasattr(self.session.cookies, "delete"):
             try:

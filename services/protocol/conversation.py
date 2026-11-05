@@ -17,6 +17,8 @@ from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
 from utils.helper import (
     CODEX_IMAGE_MODEL_25,
+    CODEX_IMAGE_MODEL_26,
+    ModelNotFoundError,
     IMAGE_MODELS,
     extract_image_from_message_content,
     is_codex_image_model,
@@ -205,8 +207,8 @@ def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
     return [base64.b64encode(data).decode("ascii") for data, _, _ in images if data]
 
 
-def save_image_bytes(image_data: bytes, base_url: str | None = None) -> str:
-    return image_storage_service.save(image_data, base_url).url
+def save_image_bytes(image_data: bytes, base_url: str | None = None, mime_type: str = "") -> str:
+    return image_storage_service.save(image_data, base_url, mime_type).url
 
 
 def message_text(content: Any) -> str:
@@ -333,15 +335,16 @@ def format_image_result(
         if not b64_json:
             continue
         revised_prompt = str(item.get("revised_prompt") or prompt).strip() or prompt
+        mime_type = str(item.get("mime_type") or item.get("content_type") or "").strip().lower()
         if response_format == "b64_json":
             data.append({
                 "b64_json": b64_json,
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
+                "url": save_image_bytes(base64.b64decode(b64_json), base_url, mime_type),
                 "revised_prompt": revised_prompt,
             })
         else:
             data.append({
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
+                "url": save_image_bytes(base64.b64decode(b64_json), base_url, mime_type),
                 "revised_prompt": revised_prompt,
             })
     result: dict[str, Any] = {"created": created or int(time.time()), "data": data}
@@ -1111,8 +1114,8 @@ def stream_image_outputs(
         if request.progress_callback:
             request.progress_callback("receiving_image")
         image_items = [
-            {"b64_json": base64.b64encode(image_data).decode("ascii")}
-            for image_data in backend.download_image_bytes(image_urls)
+            {"b64_json": base64.b64encode(image_data).decode("ascii"), "mime_type": mime_type}
+            for image_data, mime_type in backend.download_image_parts(image_urls)
         ]
         data = format_image_result(
             image_items,
@@ -1208,8 +1211,8 @@ def stream_image_outputs(
                     if request.progress_callback:
                         request.progress_callback("receiving_image")
                     image_items = [
-                        {"b64_json": base64.b64encode(image_data).decode("ascii")}
-                        for image_data in backend.download_image_bytes(image_urls)
+                        {"b64_json": base64.b64encode(image_data).decode("ascii"), "mime_type": mime_type}
+                        for image_data, mime_type in backend.download_image_parts(image_urls)
                     ]
                     data = format_image_result(
                         image_items,
@@ -1320,8 +1323,8 @@ def stream_image_outputs(
                 if request.progress_callback:
                     request.progress_callback("receiving_image")
                 image_items = [
-                    {"b64_json": base64.b64encode(image_data).decode("ascii")}
-                    for image_data in backend.download_image_bytes(image_urls)
+                    {"b64_json": base64.b64encode(image_data).decode("ascii"), "mime_type": mime_type}
+                    for image_data, mime_type in backend.download_image_parts(image_urls)
                 ]
                 data = format_image_result(
                     image_items,
@@ -1374,6 +1377,8 @@ def codex_image_tool_model(model: object) -> str:
     _, base_model = split_image_model(model)
     if base_model == CODEX_IMAGE_MODEL_25:
         return config.codex_image_model_25_name
+    if base_model == CODEX_IMAGE_MODEL_26:
+        return config.codex_image_model_26_name
     return "gpt-image-2"
 
 
@@ -1423,11 +1428,14 @@ def _generate_single_image(
     MAX_CONN_TIMEOUT_RETRIES = 3
     # 轮询超时错误最大重试次数（换账号重试）
     MAX_POLL_TIMEOUT_RETRIES = 4
+    # 404 Model not found 换号重试次数（在原重试预算内）
+    MAX_MODEL_NOT_FOUND_RETRIES = 4
 
     text_reply_retry_count = 0
     tls_retry_count = 0
     conn_timeout_retry_count = 0
     poll_timeout_retry_count = 0
+    model_not_found_retry_count = 0
     account_email = ""
 
     while True:
@@ -1436,6 +1444,8 @@ def _generate_single_image(
                 request.progress_callback("getting_account")
             plan_type, _ = split_image_model(request.model)
             codex_model = is_codex_image_model(request.model)
+            # Web image requests intentionally do not filter source_type: older
+            # imports may label a browser-capable OAuth account as "codex".
             token = account_service.get_available_access_token(
                 plan_type=plan_type,
                 source_type="codex" if codex_model else None,
@@ -1503,6 +1513,27 @@ def _generate_single_image(
                 return outputs
             account_service.mark_image_result(token, True)
             return outputs
+        except ModelNotFoundError as exc:
+            # Exact 404 detail "Model not found" on an auto image conversation: cool this account down locally for 10 minutes and switch account.
+            account_service.release_image_slot(token)
+            account_service.cool_down_image_token(token, 600.0)
+            model_not_found_retry_count += 1
+            logger.warning({
+                "event": "image_model_not_found_retry",
+                "request_token": token,
+                "account_email": account_email,
+                "retry_count": model_not_found_retry_count,
+                "index": index,
+            })
+            if not emitted_for_token and model_not_found_retry_count <= MAX_MODEL_NOT_FOUND_RETRIES:
+                continue
+            raise ImageGenerationError(
+                "Image generation failed: upstream returned 404 Model not found for the selected accounts. Please try again later.",
+                status_code=502,
+                error_type="server_error",
+                code="upstream_model_not_found",
+                account_email=account_email,
+            ) from exc
         except ImagePollTimeoutError as exc:
             account_service.mark_image_result(token, False)
             if account_email:

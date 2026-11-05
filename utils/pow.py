@@ -1,11 +1,13 @@
 import json
 import math
+import os
 import random
 import re
 import time
 from datetime import datetime
 from html.parser import HTMLParser
 from typing import Any, Sequence
+from zoneinfo import ZoneInfo
 
 import pybase64
 
@@ -56,22 +58,14 @@ def parse_pow_resources(html_content: str) -> tuple[list[str], str]:
     return script_sources, data_build
 
 
-def _chrome_local_date(moment: datetime | None = None) -> str:
-    local = moment.astimezone() if moment is not None else datetime.now().astimezone()
-    offset = local.utcoffset()
-    total_seconds = int(offset.total_seconds()) if offset is not None else 0
-    sign = "+" if total_seconds >= 0 else "-"
-    total_seconds = abs(total_seconds)
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes = remainder // 60
-    if sign == "+" and hours == 8 and minutes == 0:
-        tz_name = "中国标准时间"
-    else:
-        tz_name = local.tzname() or "UTC"
+def _chrome_local_date(moment: datetime | None = None, tz_key: str | None = None) -> str:
+    # Match the HAR web client: zh-CN browser at GMT+0800 (China Standard Time).
+    from datetime import timedelta, timezone
+    base = moment or datetime.now(timezone.utc)
+    local = base.astimezone(timezone(timedelta(hours=8)))
     return (
         f"{_WEEKDAYS[local.weekday()]} {_MONTHS[local.month - 1]} {local.day:02d} {local.year:04d} "
-        f"{local.hour:02d}:{local.minute:02d}:{local.second:02d} "
-        f"GMT{sign}{hours:02d}{minutes:02d} ({tz_name})"
+        f"{local.hour:02d}:{local.minute:02d}:{local.second:02d} GMT+0800 (中国标准时间)"
     )
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import mimetypes
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,7 +19,14 @@ from services.config import DATA_DIR, config
 
 IMAGE_INDEX_FILE = DATA_DIR / "image_index.json"
 IMAGE_INDEX_LOCK = Lock()
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+IMAGE_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
 
 
 class ImageStorageError(RuntimeError):
@@ -31,6 +39,7 @@ class StoredImage:
     url: str
     storage: str
     size: int
+    mime_type: str = "image/png"
 
 
 def _clean(value: object) -> str:
@@ -57,6 +66,32 @@ def _image_dimensions(payload: bytes) -> tuple[int, int] | None:
             return image.size
     except Exception:
         return None
+
+
+def _image_metadata(payload: bytes, content_type: str = "") -> tuple[str, str, tuple[int, int] | None]:
+    supplied_mime = str(content_type or "").split(";", 1)[0].strip().lower()
+    try:
+        with Image.open(io.BytesIO(payload)) as image:
+            image_format = str(image.format or "").upper()
+            mime_type = Image.MIME.get(image_format, "") or supplied_mime
+            extension = {
+                "JPEG": ".jpg",
+                "JPG": ".jpg",
+                "PNG": ".png",
+                "WEBP": ".webp",
+                "GIF": ".gif",
+            }.get(image_format, "")
+            if not extension and mime_type:
+                extension = mimetypes.guess_extension(mime_type) or ".png"
+            if extension == ".jpe":
+                extension = ".jpg"
+            mime_type = mime_type or IMAGE_MIME_TYPES.get(extension, "image/png")
+            return mime_type, extension or ".png", image.size
+    except Exception:
+        extension = mimetypes.guess_extension(supplied_mime) if supplied_mime else ".png"
+        if extension == ".jpe":
+            extension = ".jpg"
+        return supplied_mime or IMAGE_MIME_TYPES.get(extension or ".png", "image/png"), extension or ".png", None
 
 
 def _is_image_rel(path: str) -> bool:
@@ -196,15 +231,17 @@ class ImageStorageService:
             return f"{public_base_url.rstrip('/')}/{_safe_relative_path(rel)}"
         return f"{(base_url or config.base_url).rstrip('/')}/images/{_safe_relative_path(rel)}"
 
-    def make_relative_path(self, image_data: bytes) -> str:
+    def make_relative_path(self, image_data: bytes, content_type: str = "") -> str:
         file_hash = hashlib.md5(image_data).hexdigest()
-        filename = f"{int(time.time())}_{file_hash}.png"
+        _, extension, _ = _image_metadata(image_data, content_type)
+        filename = f"{int(time.time())}_{file_hash}{extension}"
         relative_dir = Path(time.strftime("%Y"), time.strftime("%m"), time.strftime("%d"))
         return f"{relative_dir.as_posix()}/{filename}"
 
-    def save(self, image_data: bytes, base_url: str | None = None) -> StoredImage:
+    def save(self, image_data: bytes, base_url: str | None = None, content_type: str = "") -> StoredImage:
         config.cleanup_old_images()
-        rel = self.make_relative_path(image_data)
+        mime_type, _, dimensions = _image_metadata(image_data, content_type)
+        rel = self.make_relative_path(image_data, mime_type)
         mode = self.mode()
         if mode not in {"local", "webdav", "both"}:
             mode = "local"
@@ -219,10 +256,9 @@ class ImageStorageService:
             stored_local = True
 
         if mode in {"webdav", "both"}:
-            remote_url = WebDAVClient(self.settings()).put(rel, image_data)
+            remote_url = WebDAVClient(self.settings()).put(rel, image_data, content_type=mime_type)
             stored_webdav = True
 
-        dimensions = _image_dimensions(image_data)
         item = {
             "rel": rel,
             "path": rel,
@@ -234,6 +270,7 @@ class ImageStorageService:
             "local": stored_local,
             "webdav": stored_webdav,
             "remote_url": remote_url,
+            "mime_type": mime_type,
         }
         if dimensions:
             item["width"], item["height"] = dimensions
@@ -241,7 +278,19 @@ class ImageStorageService:
             items = self._load_clean_index()
             items[rel] = item
             self._save_index(items)
-        return StoredImage(rel=rel, url=self._public_url(rel, base_url), storage=str(item["storage"]), size=len(image_data))
+        return StoredImage(
+            rel=rel,
+            url=self._public_url(rel, base_url),
+            storage=str(item["storage"]),
+            size=len(image_data),
+            mime_type=mime_type,
+        )
+
+    def content_type(self, rel: str) -> str:
+        safe_rel = _safe_relative_path(rel)
+        item = self._load_clean_index().get(safe_rel, {})
+        mime_type = str(item.get("mime_type") or "").strip().lower()
+        return mime_type or IMAGE_MIME_TYPES.get(Path(safe_rel).suffix.lower(), "application/octet-stream")
 
     def get_bytes(self, rel: str) -> bytes:
         safe_rel = _safe_relative_path(rel)
@@ -280,8 +329,10 @@ class ImageStorageService:
                 if rel in indexed:
                     continue
                 dimensions = None
+                mime_type = IMAGE_MIME_TYPES.get(path.suffix.lower(), "application/octet-stream")
                 try:
-                    dimensions = _image_dimensions(path.read_bytes())
+                    payload = path.read_bytes()
+                    mime_type, _, dimensions = _image_metadata(payload, mime_type)
                 except Exception:
                     dimensions = None
                 indexed[rel] = {
@@ -294,6 +345,7 @@ class ImageStorageService:
                     "storage": "local",
                     "local": True,
                     "webdav": False,
+                    "mime_type": mime_type,
                     **({"width": dimensions[0], "height": dimensions[1]} if dimensions else {}),
                 }
                 changed = True

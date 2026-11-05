@@ -904,6 +904,7 @@ class AccountService:
                and self._account_matches_source_type(item, source_type)
                and (token := item.get("access_token") or "")
                and token not in excluded
+               and not self._is_cooling_down(token)
         ]
 
     def _list_available_candidate_tokens(
@@ -941,6 +942,25 @@ class AccountService:
                     self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
                     return access_token
                 self._image_slot_condition.wait(timeout=1.0)
+
+    def cool_down_image_token(self, access_token: str, seconds: float = 600.0) -> None:
+        """Local-only cooldown: skip this account for a while. Does not touch quota, status or proxy health."""
+        import time as _time
+        if not access_token:
+            return
+        cooldowns = self.__dict__.setdefault("_image_cooldowns", {})
+        cooldowns[access_token] = _time.time() + float(seconds)
+
+    def _is_cooling_down(self, access_token: str) -> bool:
+        import time as _time
+        cooldowns = self.__dict__.get("_image_cooldowns") or {}
+        until = cooldowns.get(access_token)
+        if not until:
+            return False
+        if until <= _time.time():
+            cooldowns.pop(access_token, None)
+            return False
+        return True
 
     def release_image_slot(self, access_token: str) -> None:
         if not access_token:
