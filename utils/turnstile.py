@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from py_mini_racer import JSUndefined, MiniRacer
+from py_mini_racer import MiniRacer
 
 from utils.log import logger
 
@@ -77,9 +77,10 @@ def _solve(ctx: MiniRacer, dx: str, p_token: str) -> str:
     )
     token = ctx.eval("globalThis.__token", timeout=30)
     error = ctx.eval("globalThis.__err", timeout=30)
-    if error is not JSUndefined and error is not None:
+    # py-mini-racer 0.6.x maps JavaScript undefined to Python None.
+    if error is not None:
         raise RuntimeError(f"sentinel solve failed: {error}")
-    if token is JSUndefined or token is None:
+    if token is None:
         raise RuntimeError("sentinel solve returned no token")
     return str(token)
 

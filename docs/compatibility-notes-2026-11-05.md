@@ -36,3 +36,9 @@ exit=0
 ```
 
 本地服务启动成功，`/v1/models` 返回 HTTP 200；但本地 `data/accounts.json` 为空，所以没有执行本地真实图片请求。全量非 HTTP 测试仍包含仓库内既有的 Outlook fixture、图片任务 API 鉴权和多图轮询失败，不能把它们混入本次 Web/GIF 兼容性结论。真实 GIF 生成仍需使用已配置账号通过本地服务接口验收，并用 Pillow 检查文件头、帧数和尺寸。
+
+## 154 镜像切换边界（2026-11-05 追加）
+
+- 154 原主服务必须保持 `chatgpt2api-image` / `ghcr.io/chenjingwei0103/chatgpt2api-pr418:sha-06451d7`；新版本验收应使用独立容器和独立端口，不能直接替换旧容器。
+- 原主服务的 compose 和数据库已做备份；恢复后确认旧镜像运行、`/opt/chatgpt2api-image/data:/app/data` 与 `/opt/chatgpt2api-image/config.json:/app/config.json` 挂载仍在，数据库记录数为 655。
+- 新镜像首次启动暴露了兼容性问题：`py-mini-racer 0.6.0` 没有 `JSUndefined`，`eval("undefined")` 映射为 Python `None`。本地修复为仅导入 `MiniRacer`、用 `None` 判断，并加入 `test/test_turnstile_compat.py` 回归测试。
