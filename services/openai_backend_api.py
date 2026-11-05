@@ -32,6 +32,8 @@ from utils.turnstile import solve_turnstile_token
 
 
 CLIENT_TIMEZONE = "UTC"
+CLIENT_CREATED_ROOT = "client-created-root"
+IMAGE_CREATION_MENTION = "@创建图像"
 
 
 def client_timezone_offset_min(moment: object | None = None) -> int:
@@ -849,7 +851,16 @@ class OpenAIBackendAPI:
     def _image_headers(self, path: str, requirements: ChatRequirements, conduit_token: str = "", accept: str = "*/*") -> \
             Dict[str, str]:
         if accept == "text/event-stream":
-            return self._conversation_headers(path, requirements, conduit_token)
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": accept,
+                **self._sentinel_headers(requirements),
+            }
+            if conduit_token:
+                headers["X-Conduit-Token"] = conduit_token
+            trace_id = str(getattr(self, "_image_turn_trace_id", "") or "").strip()
+            headers["X-OAI-Turn-Trace-Id"] = trace_id or new_uuid()
+            return self._headers(path, headers)
         headers = {
             "Content-Type": "application/json",
             "Accept": accept,
@@ -857,6 +868,9 @@ class OpenAIBackendAPI:
         }
         if conduit_token:
             headers["X-Conduit-Token"] = conduit_token
+        trace_id = str(getattr(self, "_image_turn_trace_id", "") or "").strip()
+        if trace_id:
+            headers["X-OAI-Turn-Trace-Id"] = trace_id
         return self._headers(path, headers)
 
     def _codex_responses_headers(self) -> Dict[str, str]:
@@ -1129,8 +1143,39 @@ class OpenAIBackendAPI:
             raise UpstreamHTTPError(path, error.code, body, retry_after=retry_after) from error
 
     def _prepare_image_conversation(self, prompt: str, requirements: ChatRequirements, model: str) -> str:
-        payload = self._image_conversation_payload(prompt, model, [])
-        return self._prepare_f_conversation(payload)
+        path = "/backend-api/f/conversation/prepare"
+        self._image_turn_trace_id = new_uuid()
+        payload = {
+            "action": "next",
+            "is_do_not_remember": False,
+            "model": self._image_model_settings(model)[0],
+            "parent_message_id": CLIENT_CREATED_ROOT,
+            "system_hints": ["picture_v2"],
+            "timezone": "Asia/Shanghai",
+            "timezone_offset_min": -480,
+            "client_contextual_info": self._client_contextual_info(),
+            "local_function_names": ["local.continue_in_work"],
+            "supported_encodings": ["v1"],
+            "client_prepare_state": "sent",
+            "partial_query": {
+                "id": new_uuid(),
+                "author": {"role": "user"},
+                "content": {"content_type": "text", "parts": [prompt]},
+            },
+            "client_prepare_dispatch": "debounced",
+            "client_prepare_source": "composer_editor_state",
+        }
+        response = self.session.post(
+            self.base_url + path,
+            headers=self._image_headers(path, requirements),
+            json=payload,
+            timeout=60,
+        )
+        ensure_ok(response, path)
+        conduit_token = str((response.json() or {}).get("conduit_token") or "")
+        if not conduit_token:
+            raise RuntimeError("missing conduit_token")
+        return conduit_token
 
     def _decode_image_base64(self, image: str) -> bytes:
         """把 base64 图片字符串或本地路径解码成二进制。"""
@@ -1214,6 +1259,7 @@ class OpenAIBackendAPI:
     ) -> Dict[str, Any]:
         upstream_model, thinking_effort = self._image_model_settings(model)
         references = references or []
+        mention_text = f"{IMAGE_CREATION_MENTION} {prompt}"
         parts: list[Any] = [{
             "content_type": "image_asset_pointer",
             "asset_pointer": f"file-service://{item['file_id']}",
@@ -1221,13 +1267,27 @@ class OpenAIBackendAPI:
             "height": item["height"],
             "size_bytes": item["file_size"],
         } for item in references]
-        parts.append(prompt)
+        parts.append(mention_text)
         content = (
             {"content_type": "multimodal_text", "parts": parts}
             if references else
-            {"content_type": "text", "parts": [prompt]}
+            {"content_type": "text", "parts": [mention_text]}
         )
-        metadata: Dict[str, Any] = {}
+        metadata: Dict[str, Any] = {
+            "developer_mode_connector_ids": [],
+            "selected_github_repos": [],
+            "selected_all_github_repos": False,
+            "system_hints": ["picture_v2"],
+            "serialization_metadata": {
+                "render_format": "markdown",
+                "custom_symbol_offsets": [{
+                    "id": "picture_v2",
+                    "symbol": "ecosystemMention",
+                    "startIndex": 0,
+                    "endIndex": len(IMAGE_CREATION_MENTION),
+                }],
+            },
+        }
         if references:
             metadata["attachments"] = [{
                 "id": item["file_id"],
@@ -1239,18 +1299,14 @@ class OpenAIBackendAPI:
             } for item in references]
         message_id = new_uuid()
         payload = {
+            "turn_attribution": {"turn_trigger": "composer"},
             "action": "next",
             "is_do_not_remember": False,
-            "model": upstream_model,
-            "parent_message_id": "client-created-root",
-            "timezone": CLIENT_TIMEZONE,
-            "timezone_offset_min": client_timezone_offset_min(),
-            "client_contextual_info": self._client_contextual_info(),
             "messages": [{
                 "author": {"metadata": {}, "name": None, "role": "user"},
                 "channel": None,
                 "content": content,
-                "create_time": round(time.time(), 3),
+                "create_time": time.time(),
                 "end_turn": None,
                 "id": message_id,
                 "metadata": metadata,
@@ -1259,7 +1315,15 @@ class OpenAIBackendAPI:
                 "update_time": None,
                 "weight": 1,
             }],
+            "parent_message_id": CLIENT_CREATED_ROOT,
+            "model": upstream_model,
+            "system_hints": ["picture_v2"],
+            "timezone_offset_min": -480,
+            "timezone": "Asia/Shanghai",
+            "client_contextual_info": self._client_contextual_info(),
+            "local_function_names": ["local.continue_in_work"],
             "supported_encodings": ["v1"],
+            "genui_state_snapshots": [],
             "client_prepare_state": "success",
         }
         if thinking_effort:
@@ -1276,7 +1340,8 @@ class OpenAIBackendAPI:
             payload: Optional[Dict[str, Any]] = None,
             trace_id: str = "",
     ) -> requests.Response:
-        trace_id = trace_id or new_uuid()
+        trace_id = trace_id or str(getattr(self, "_image_turn_trace_id", "") or "").strip() or new_uuid()
+        self._image_turn_trace_id = trace_id
         payload = payload or self._image_conversation_payload(prompt, model, references)
         path = "/backend-api/f/conversation"
         response = self._post_image_conversation(path, requirements, conduit_token, payload, trace_id=trace_id)
@@ -1294,9 +1359,11 @@ class OpenAIBackendAPI:
             payload: Dict[str, Any],
             trace_id: str = "",
     ) -> requests.Response:
+        if trace_id:
+            self._image_turn_trace_id = trace_id
         return self.session.post(
             self.base_url + path,
-            headers=self._conversation_headers(path, requirements, conduit_token, trace_id=trace_id),
+            headers=self._image_headers(path, requirements, conduit_token, "text/event-stream"),
             json=payload,
             timeout=300,
             stream=True,
@@ -2910,7 +2977,7 @@ class OpenAIBackendAPI:
         requirements = self._get_chat_requirements()
         payload = self._image_conversation_payload(prompt, model, references)
         self._report_progress("preparing_conversation")
-        conduit_token = self._prepare_f_conversation(payload)
+        conduit_token = self._prepare_image_conversation(prompt, requirements, model)
         self._report_progress("starting_generation")
         response = self._start_image_generation(
             prompt,
