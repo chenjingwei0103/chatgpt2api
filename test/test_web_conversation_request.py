@@ -205,7 +205,8 @@ class WebConversationRequestTest(unittest.TestCase):
             self._header(prepare["headers"], "X-OAI-Turn-Trace-Id"),
             self._header(conversation["headers"], "X-OAI-Turn-Trace-Id"),
         )
-        self.assertEqual(self._header(conversation["headers"], "X-OpenAI-Target-Path"), "/backend-api/f/conversation")
+        self.assertEqual(self._header(conversation["headers"], "X-OpenAI-Target-Route"), "/backend-api/f/conversation")
+        self.assertNotIn("x-openai-target-path", {str(key).lower() for key in conversation["headers"]})
         self.assertNotIn("originator", {str(key).lower() for key in conversation["headers"]})
 
     def test_account_id_header_comes_from_access_token(self) -> None:

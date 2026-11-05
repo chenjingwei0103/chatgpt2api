@@ -331,9 +331,9 @@ class OpenAIBackendAPI:
         return fp
 
     def _headers(self, path: str, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-        """构造请求头，并补上 web 端要求的 target path/route。"""
+        """构造请求头，并补上 web 端要求的 target route。"""
         headers = dict(self.session.headers)
-        headers["X-OpenAI-Target-Path"] = path
+        # Sending Target-Path and Target-Route together can trigger intermittent 403s.
         headers["X-OpenAI-Target-Route"] = path
         headers.setdefault("X-OpenAI-Web-Frontend", "core_web")
         headers.setdefault("OAI-GenUI-Client-Actions", "open_entity_detail,run_plugin_tool")
