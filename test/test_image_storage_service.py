@@ -16,6 +16,13 @@ def png_bytes() -> bytes:
     return path.read_bytes()
 
 
+def gif_bytes() -> bytes:
+    path = Path(tempfile.gettempdir()) / "chatgpt2api-test-image.gif"
+    frames = [Image.new("P", (3, 2), color=index) for index in (1, 2)]
+    frames[0].save(path, format="GIF", save_all=True, append_images=frames[1:], duration=120, loop=0)
+    return path.read_bytes()
+
+
 class FakeWebDAVClient:
     uploaded: dict[str, bytes] = {}
     deleted: list[str] = []
@@ -23,7 +30,7 @@ class FakeWebDAVClient:
     def __init__(self, _settings):
         pass
 
-    def put(self, rel: str, payload: bytes) -> str:
+    def put(self, rel: str, payload: bytes, content_type: str = "image/png") -> str:
         self.uploaded[rel] = payload
         return f"https://dav.example.test/{rel}"
 
@@ -75,6 +82,14 @@ class ImageStorageServiceTests(unittest.TestCase):
         self.assertEqual(stored.storage, "local")
         self.assertTrue((self.images_dir / stored.rel).is_file())
         self.assertEqual(stored.url, f"http://app.test/images/{stored.rel}")
+
+    def test_local_mode_preserves_gif_extension_and_mime_type(self):
+        stored = self.service().save(gif_bytes(), "http://app.test")
+
+        self.assertTrue(stored.rel.endswith(".gif"))
+        self.assertEqual(stored.mime_type, "image/gif")
+        self.assertTrue((self.images_dir / stored.rel).is_file())
+        self.assertEqual(self.service().content_type(stored.rel), "image/gif")
 
     def test_webdav_mode_uploads_without_local_file(self):
         self.settings.update({
