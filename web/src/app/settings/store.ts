@@ -187,7 +187,9 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     global_system_prompt: String(config.global_system_prompt || ""),
     default_upstream_model_name: String(config.default_upstream_model_name || "gpt-5-5"),
     default_upstream_model_name_25: String(config.default_upstream_model_name_25 || ""),
+    default_upstream_model_name_26: String(config.default_upstream_model_name_26 || ""),
     codex_image_model_25_name: String(config.codex_image_model_25_name || "gpt-image-2.5-flare"),
+    codex_image_model_26_name: String(config.codex_image_model_26_name || "gpt-image-2.6"),
     default_thinking_effort: defaultThinkingEffort,
     sensitive_words: Array.isArray(config.sensitive_words) ? config.sensitive_words : [],
     ai_review: {
@@ -312,7 +314,9 @@ type SettingsStore = {
   setGlobalSystemPrompt: (value: string) => void;
   setDefaultUpstreamModelName: (value: string) => void;
   setDefaultUpstreamModelName25: (value: string) => void;
+  setDefaultUpstreamModelName26: (value: string) => void;
   setCodexImageModel25Name: (value: string) => void;
+  setCodexImageModel26Name: (value: string) => void;
   setDefaultThinkingEffort: (value: "auto" | "standard" | "extended" | "max") => void;
   setSensitiveWordsText: (value: string) => void;
   setAIReviewField: (key: "enabled" | "base_url" | "api_key" | "model" | "prompt", value: string | boolean) => void;
@@ -441,7 +445,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         global_system_prompt: String(config.global_system_prompt || "").trim(),
         default_upstream_model_name: String(config.default_upstream_model_name || "gpt-5-5").trim() || "gpt-5-5",
         default_upstream_model_name_25: String(config.default_upstream_model_name_25 || "").trim(),
+        default_upstream_model_name_26: String(config.default_upstream_model_name_26 || "").trim(),
         codex_image_model_25_name: String(config.codex_image_model_25_name || "gpt-image-2.5-flare").trim() || "gpt-image-2.5-flare",
+        codex_image_model_26_name: String(config.codex_image_model_26_name || "gpt-image-2.6").trim() || "gpt-image-2.6",
         default_thinking_effort: ["standard", "extended", "max"].includes(String(config.default_thinking_effort))
           ? config.default_thinking_effort
           : "auto",
@@ -626,8 +632,16 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set((state) => state.config ? { config: { ...state.config, default_upstream_model_name_25: value } } : {});
   },
 
+  setDefaultUpstreamModelName26: (value) => {
+    set((state) => state.config ? { config: { ...state.config, default_upstream_model_name_26: value } } : {});
+  },
+
   setCodexImageModel25Name: (value) => {
     set((state) => state.config ? { config: { ...state.config, codex_image_model_25_name: value } } : {});
+  },
+
+  setCodexImageModel26Name: (value) => {
+    set((state) => state.config ? { config: { ...state.config, codex_image_model_26_name: value } } : {});
   },
 
   setDefaultThinkingEffort: (value) => {

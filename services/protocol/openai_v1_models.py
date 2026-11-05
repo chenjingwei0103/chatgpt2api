@@ -4,7 +4,7 @@ from typing import Any
 
 from services.account_service import account_service
 from services.model_service import model_catalog_service
-from utils.helper import CODEX_IMAGE_MODEL, CODEX_IMAGE_MODEL_25
+from utils.helper import CODEX_IMAGE_MODEL, CODEX_IMAGE_MODEL_25, CODEX_IMAGE_MODEL_26
 
 
 def list_models() -> dict[str, Any]:
@@ -31,7 +31,8 @@ def list_models() -> dict[str, Any]:
     if web_image_accounts:
         dynamic_models.add("gpt-image-2")
         dynamic_models.add("gpt-image-2.5")
-    for codex_model in (CODEX_IMAGE_MODEL, CODEX_IMAGE_MODEL_25):
+        dynamic_models.add("gpt-image-2.6")
+    for codex_model in (CODEX_IMAGE_MODEL, CODEX_IMAGE_MODEL_25, CODEX_IMAGE_MODEL_26):
         if codex_types & {"Plus", "Team", "Pro"}:
             dynamic_models.add(codex_model)
         if "Plus" in codex_types:

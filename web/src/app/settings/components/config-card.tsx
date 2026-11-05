@@ -40,7 +40,9 @@ export function ConfigCard() {
   const setGlobalSystemPrompt = useSettingsStore((state) => state.setGlobalSystemPrompt);
   const setDefaultUpstreamModelName = useSettingsStore((state) => state.setDefaultUpstreamModelName);
   const setDefaultUpstreamModelName25 = useSettingsStore((state) => state.setDefaultUpstreamModelName25);
+  const setDefaultUpstreamModelName26 = useSettingsStore((state) => state.setDefaultUpstreamModelName26);
   const setCodexImageModel25Name = useSettingsStore((state) => state.setCodexImageModel25Name);
+  const setCodexImageModel26Name = useSettingsStore((state) => state.setCodexImageModel26Name);
   const setDefaultThinkingEffort = useSettingsStore((state) => state.setDefaultThinkingEffort);
   const setSensitiveWordsText = useSettingsStore((state) => state.setSensitiveWordsText);
   const setAIReviewField = useSettingsStore((state) => state.setAIReviewField);
@@ -188,6 +190,33 @@ export function ConfigCard() {
               </SelectContent>
             </Select>
             <p className="text-xs text-stone-500">codex-gpt-image-2.5 调用 Codex 生图工具时使用的模型，默认 gpt-image-2.5-flare。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">gpt-image-2.6 上游模型名称</label>
+            <Input
+              value={String(config?.default_upstream_model_name_26 || "")}
+              onChange={(event) => setDefaultUpstreamModelName26(event.target.value)}
+              placeholder="auto"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">
+              gpt-image-2.6 发起图片请求时使用的上游模型名称，留空时使用 auto。
+            </p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">Codex 图片 2.6 工具模型</label>
+            <Select
+              value={String(config?.codex_image_model_26_name || "gpt-image-2.6")}
+              onValueChange={(value) => setCodexImageModel26Name(value)}
+            >
+              <SelectTrigger className="h-10 rounded-xl border-stone-200 bg-white">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="gpt-image-2.6">gpt-image-2.6（默认）</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-stone-500">codex-gpt-image-2.6 调用 Codex 生图工具时使用的模型。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">默认思考强度</label>

@@ -70,6 +70,7 @@ DEFAULT_CLIENT_BUILD_NUMBER = "6708908"
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
 CODEX_IMAGE_MODEL_25 = "codex-gpt-image-2.5"
+CODEX_IMAGE_MODEL_26 = "codex-gpt-image-2.6"
 CODEX_IMAGE_MODEL_25_TOOL_NAMES = {"gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
 CODEX_IMAGE_QUALITY_TIERS = {"auto", "low", "medium", "high"}
 CODEX_IMAGE_25_QUALITY_TIERS = CODEX_IMAGE_QUALITY_TIERS | {"xhigh", "max"}
@@ -591,7 +592,9 @@ class OpenAIBackendAPI:
             upstream_model = config.default_upstream_model_name
         elif base_model == "gpt-image-2.5":
             upstream_model = config.default_upstream_model_name_25 or config.default_upstream_model_name
-        elif base_model in {CODEX_IMAGE_MODEL, CODEX_IMAGE_MODEL_25}:
+        elif base_model == "gpt-image-2.6":
+            upstream_model = config.default_upstream_model_name_26 or "auto"
+        elif base_model in {CODEX_IMAGE_MODEL, CODEX_IMAGE_MODEL_25, CODEX_IMAGE_MODEL_26}:
             upstream_model = base_model
         else:
             return "auto", ""

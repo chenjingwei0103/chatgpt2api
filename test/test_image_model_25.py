@@ -18,12 +18,16 @@ class FakeImageConfig:
         self,
         default: str = "gpt-5-5",
         default_25: str = "",
+        default_26: str = "",
         codex_25: str = "gpt-image-2.5-flare",
+        codex_26: str = "gpt-image-2.6",
         thinking: str = "auto",
     ) -> None:
         self.default_upstream_model_name = default
         self.default_upstream_model_name_25 = default_25
+        self.default_upstream_model_name_26 = default_26
         self.codex_image_model_25_name = codex_25
+        self.codex_image_model_26_name = codex_26
         self.default_thinking_effort = thinking
 
 
@@ -62,6 +66,31 @@ class ImageModel25SettingTests(unittest.TestCase):
             )
             self.assertEqual(backend._image_model_settings("unknown-model"), ("auto", ""))
 
+    def test_image_model_settings_for_gpt_image_2_6_defaults_to_auto(self) -> None:
+        with mock.patch.object(openai_backend_api, "config", FakeImageConfig(default_26="")):
+            backend = OpenAIBackendAPI()
+            self.assertEqual(backend._image_model_settings("gpt-image-2.6"), ("auto", ""))
+
+    def test_image_model_settings_for_gpt_image_2_6_uses_dedicated_upstream_model(self) -> None:
+        with mock.patch.object(
+            openai_backend_api,
+            "config",
+            FakeImageConfig(default_26="gpt-5.6-luna-standard"),
+        ):
+            backend = OpenAIBackendAPI()
+            self.assertEqual(
+                backend._image_model_settings("gpt-image-2.6"),
+                ("gpt-5.6-luna", "standard"),
+            )
+
+    def test_image_model_settings_for_codex_2_6_keeps_alias(self) -> None:
+        with mock.patch.object(openai_backend_api, "config", FakeImageConfig()):
+            backend = OpenAIBackendAPI()
+            self.assertEqual(
+                backend._image_model_settings("codex-gpt-image-2.6"),
+                ("codex-gpt-image-2.6", ""),
+            )
+
 
 class CodexImageQualityTests(unittest.TestCase):
     def test_quality_tiers_for_legacy_tool_model(self) -> None:
@@ -97,6 +126,11 @@ class CodexImageToolModelTests(unittest.TestCase):
             self.assertEqual(codex_image_tool_model("gpt-image-2.5"), "gpt-image-2")
             self.assertEqual(codex_image_tool_model("gpt-image-2"), "gpt-image-2")
 
+    def test_codex_image_tool_model_maps_26_alias(self) -> None:
+        with mock.patch.object(conversation_module, "config", FakeImageConfig()):
+            self.assertEqual(codex_image_tool_model("codex-gpt-image-2.6"), "gpt-image-2.6")
+            self.assertEqual(codex_image_tool_model("team-codex-gpt-image-2.6"), "gpt-image-2.6")
+
 
 class ImageModel25HelperTests(unittest.TestCase):
     def test_new_models_are_supported_and_classified(self) -> None:
@@ -108,6 +142,14 @@ class ImageModel25HelperTests(unittest.TestCase):
         self.assertFalse(is_codex_image_model("gpt-image-2.5"))
         self.assertFalse(is_codex_image_model("gpt-image-2"))
         self.assertFalse(is_supported_image_model("unknown-image-model"))
+
+    def test_26_models_are_supported_and_classified(self) -> None:
+        self.assertTrue(is_supported_image_model("gpt-image-2.6"))
+        self.assertTrue(is_supported_image_model("codex-gpt-image-2.6"))
+        self.assertTrue(is_supported_image_model("plus-codex-gpt-image-2.6"))
+        self.assertTrue(is_codex_image_model("codex-gpt-image-2.6"))
+        self.assertTrue(is_codex_image_model("pro-codex-gpt-image-2.6"))
+        self.assertFalse(is_codex_image_model("gpt-image-2.6"))
 
 
 if __name__ == "__main__":

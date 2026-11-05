@@ -17,6 +17,7 @@ from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
 from utils.helper import (
     CODEX_IMAGE_MODEL_25,
+    CODEX_IMAGE_MODEL_26,
     IMAGE_MODELS,
     extract_image_from_message_content,
     is_codex_image_model,
@@ -1266,6 +1267,8 @@ def codex_image_tool_model(model: object) -> str:
     _, base_model = split_image_model(model)
     if base_model == CODEX_IMAGE_MODEL_25:
         return config.codex_image_model_25_name
+    if base_model == CODEX_IMAGE_MODEL_26:
+        return config.codex_image_model_26_name
     return "gpt-image-2"
 
 
