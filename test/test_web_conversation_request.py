@@ -126,6 +126,35 @@ class WebConversationRequestTest(unittest.TestCase):
         self.assertTrue(calls[0]["json"]["force_use_sse"])
         self.assertNotIn("client_prepare_state", calls[0]["json"])
 
+    def test_solver_user_agent_does_not_partially_replace_session_fingerprint(self) -> None:
+        solver_ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/153.0.0.0 Safari/537.36"
+        with mock.patch("services.openai_backend_api.account_service.get_account", return_value={}):
+            backend = OpenAIBackendAPI(access_token="test-token")
+        original_user_agent = backend.session.headers["User-Agent"]
+        original_client_hints = {
+            key: backend.session.headers[key]
+            for key in ("Sec-Ch-Ua", "Sec-Ch-Ua-Full-Version", "Sec-Ch-Ua-Platform")
+        }
+        responses = iter([
+            _Response({"prepare_token": "prepare-token", "proofofwork": {"required": False}}),
+            _Response({"token": "requirements-token"}),
+        ])
+        backend.session.post = lambda *args, **kwargs: next(responses)
+
+        with (
+            mock.patch("services.openai_backend_api.solver_user_agent", return_value=solver_ua),
+            mock.patch("services.openai_backend_api.build_legacy_requirements_token", return_value="p-token") as build_p,
+        ):
+            requirements = backend._get_chat_requirements()
+
+        build_p.assert_called_once_with(solver_ua, backend.pow_script_sources, backend.pow_data_build)
+        self.assertEqual(requirements.token, "requirements-token")
+        self.assertEqual(backend.session.headers["User-Agent"], original_user_agent)
+        self.assertEqual(
+            {key: backend.session.headers[key] for key in original_client_hints},
+            original_client_hints,
+        )
+
     def test_image_generation_and_edit_use_web_envelope(self) -> None:
         with mock.patch("services.openai_backend_api.account_service.get_account", return_value={}):
             backend = OpenAIBackendAPI(access_token="test-token")

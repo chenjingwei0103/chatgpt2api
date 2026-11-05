@@ -3048,9 +3048,6 @@ class OpenAIBackendAPI:
         """获取当前模式对话所需的 sentinel token（prepare + finalize 两步流程）。"""
         base = "/backend-api/sentinel/chat-requirements" if self.access_token else "/backend-anon/sentinel/chat-requirements"
         sentinel_ua = solver_user_agent() or self.user_agent
-        if sentinel_ua and sentinel_ua != self.user_agent:
-            self.user_agent = sentinel_ua
-            self.session.headers["User-Agent"] = sentinel_ua
         p_token = build_legacy_requirements_token(sentinel_ua, self.pow_script_sources, self.pow_data_build)
 
         auth_header = self.session.headers.pop("Authorization", None)
